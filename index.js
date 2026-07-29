@@ -1,7 +1,7 @@
-// pocket-phone/index.js — Stage 3: bot reply via generateQuietPrompt
+// pocket-phone/index.js — Stage 4: iGlassOS home · multiline input · Dynamic Island notify
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.3.0-stage3';
+const PP_VERSION = '0.4.0-stage4';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
@@ -13,8 +13,8 @@ const DEFAULTS = {
     theme: 'dark',
     accent: '#0a84ff',
     dynamicIsland: true,
-    contacts: [],   // { id, name, avatar }
-    threads: {},    // { [id]: [ { from:'me'|'them', text, ts } ] }
+    contacts: [],
+    threads: {},
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -39,7 +39,6 @@ function saveCfg() {
 const esc = s => String(s == null ? '' : s)
     .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
 
-// ── clean CoT / junk ──
 function cleanReply(t) {
     let s = String(t || '');
     s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
@@ -48,7 +47,6 @@ function cleanReply(t) {
     return s.trim();
 }
 
-// ── user name ──
 function getUserName() {
     const c = ctx();
     try { if (c && c.name1) return c.name1; } catch {}
@@ -151,6 +149,11 @@ function getThread(id) {
     if (!cfg.threads[id]) cfg.threads[id] = [];
     return cfg.threads[id];
 }
+function isViewingThread(id) {
+    const chat = document.getElementById('pp-scr-chat');
+    const dlg = document.getElementById('pp-dialog');
+    return !!(chat && chat.classList.contains('show') && ppActiveContact && ppActiveContact.id === id && dlg && dlg.open);
+}
 
 // ── ST characters ──
 function listStCharacters() {
@@ -172,6 +175,33 @@ function getContactPersona(id) {
     return ch ? (ch.persona || '') : '';
 }
 
+// ── Dynamic Island notification ──
+let ppIslandTimer = null;
+function ppIslandNotify(contact, text) {
+    const island = document.getElementById('pp-island');
+    if (!island) return;
+    if (getCfg().dynamicIsland === false) { ppToast(`${contact.name}: ${text}`); return; }
+    island._targetId = contact.id;
+    island.innerHTML = `<div class="pp-di-inner">
+        ${contactAvatarHTML(contact, 34)}
+        <div class="pp-di-body">
+            <span class="pp-di-name">${esc(contact.name)}</span>
+            <span class="pp-di-text">${esc(text)}</span>
+        </div>
+    </div>`;
+    void island.offsetWidth; // force reflow ให้ transition ทำงาน
+    island.classList.add('expanded');
+    clearTimeout(ppIslandTimer);
+    ppIslandTimer = setTimeout(collapseIsland, 4500);
+}
+function collapseIsland() {
+    const island = document.getElementById('pp-island');
+    if (!island) return;
+    island.classList.remove('expanded');
+    clearTimeout(ppIslandTimer);
+    setTimeout(() => { if (!island.classList.contains('expanded')) island.innerHTML = ''; }, 550);
+}
+
 // ── SVG glyphs ──
 const ICON = {
     story: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2C10.5 5 8.4 4.5 6 4.5c-.8 0-1.5.6-1.5 1.4v11c0 .8.7 1.4 1.5 1.4 2.1 0 4 .5 5.3 1.5.4.3 1 .3 1.4 0 1.3-1 3.2-1.5 5.3-1.5.8 0 1.5-.6 1.5-1.4v-11c0-.8-.7-1.4-1.5-1.4-2.4 0-4.5.5-6 1.7zM12 6.2v12"/></svg>`,
@@ -184,15 +214,15 @@ const ICON = {
     battery: `<svg viewBox="0 0 26 12" fill="none"><rect x=".5" y=".5" width="21" height="11" rx="3" stroke="currentColor" stroke-opacity=".4"/><rect x="2" y="2" width="16" height="8" rx="1.5" fill="currentColor"/><rect x="23" y="4" width="1.8" height="4" rx=".9" fill="currentColor" fill-opacity=".4"/></svg>`,
     back: `<svg viewBox="0 0 12 20" width="11" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10l8 8"/></svg>`,
     compose: `<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>`,
-    send: `<svg viewBox="0 0 24 24" width="17" height="17" fill="#fff"><path d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z"/></svg>`,
+    send: `<svg viewBox="0 0 24 24" width="18" height="18" fill="#fff"><path d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z"/></svg>`,
 };
 
 const APPS = [
-    { nav: 'story', label: 'Story', tint: 'linear-gradient(160deg,#5e5ce6,#3a38b0)', icon: ICON.story },
-    { nav: 'messages', label: 'Messages', tint: 'linear-gradient(160deg,#34c759,#22913e)', icon: ICON.messages },
-    { nav: 'feed', label: 'Feed', tint: 'linear-gradient(160deg,#2b2b2e,#0c0c0d)', icon: ICON.feed },
-    { nav: 'wallet', label: 'Wallet', tint: 'linear-gradient(160deg,#ff9f0a,#d17400)', icon: ICON.wallet },
-    { nav: 'settings', label: 'Settings', tint: 'linear-gradient(160deg,#9a9aa0,#5a5a5e)', icon: ICON.settings },
+    { nav: 'story', label: 'Story', tint: 'linear-gradient(160deg,#7b79ff,#4a48c8)', icon: ICON.story },
+    { nav: 'messages', label: 'Messages', tint: 'linear-gradient(160deg,#4fdb6e,#25a244)', icon: ICON.messages },
+    { nav: 'feed', label: 'Feed', tint: 'linear-gradient(160deg,#3a3a3e,#141416)', icon: ICON.feed },
+    { nav: 'wallet', label: 'Wallet', tint: 'linear-gradient(160deg,#ffb340,#dd7f00)', icon: ICON.wallet },
+    { nav: 'settings', label: 'Settings', tint: 'linear-gradient(160deg,#a9a9af,#5a5a5e)', icon: ICON.settings },
 ];
 
 // ── HTML ──
@@ -213,14 +243,21 @@ function buildPhone() {
     </div>
 
     <div id="pp-screens">
+      <!-- HOME (iGlassOS) -->
       <div class="pp-screen show" id="pp-home">
-        <div class="pp-home-clock pp-clock">9:41</div>
-        <div id="pp-home-date">Saturday, May 17</div>
+        <div class="pp-home-blobs"></div>
+        <div class="pp-home-top">
+          <div class="pp-home-clock pp-clock">9:41</div>
+          <div id="pp-home-date">Saturday, May 17</div>
+        </div>
         <div style="flex:1"></div>
-        <div class="pp-grid">${grid}</div>
+        <div class="pp-glass-tray">
+          <div class="pp-grid">${grid}</div>
+        </div>
         <div class="pp-home-bar"></div>
       </div>
 
+      <!-- MESSAGES -->
       <div class="pp-screen" id="pp-scr-messages">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="home">${ICON.back}</button>
@@ -232,6 +269,7 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
+      <!-- ADD CONTACT -->
       <div class="pp-screen" id="pp-scr-contacts">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
@@ -242,12 +280,14 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
+      <!-- CHAT -->
       <div class="pp-screen" id="pp-scr-chat">
         <div class="pp-chat-header" id="pp-chat-header">
           <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
           <div class="pp-chat-hdr-center">
             <span id="pp-chat-hdr-av"></span>
             <span class="pp-chat-hdr-name" id="pp-chat-hdr-name">Contact</span>
+            <span class="pp-chat-hdr-status">ออนไลน์</span>
           </div>
           <span style="width:34px"></span>
         </div>
@@ -350,6 +390,7 @@ function hideTyping() { document.getElementById('pp-typing')?.remove(); }
 function ppOpenThread(id) {
     const c = getContacts().find(x => x.id === id);
     if (!c) return;
+    collapseIsland();
     ppActiveContact = c;
     ppNav('chat');
 }
@@ -388,7 +429,8 @@ async function botReply() {
     const c = ppActiveContact;
     if (!c || ppIsTyping) return;
     ppIsTyping = true;
-    showTyping();
+    const viewing = () => isViewingThread(c.id);
+    if (viewing()) showTyping();
     try {
         const context = ctx();
         const userName = getUserName();
@@ -414,12 +456,10 @@ async function botReply() {
             throw new Error('generateQuietPrompt ไม่พร้อมใช้งาน');
         }
 
-        // clean
         raw = cleanReply(raw);
         const nameRx = new RegExp('^' + c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
         raw = raw.replace(nameRx, '').trim();
 
-        // แยกเป็นหลายฟองตามบรรทัด (สูงสุด 3)
         const lines = raw.split(/\n+/)
             .map(l => l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '').trim())
             .filter(Boolean)
@@ -428,21 +468,24 @@ async function botReply() {
 
         const threadArr = getThread(c.id);
         for (let i = 0; i < lines.length; i++) {
-            if (i > 0) {
-                showTyping();
-                await new Promise(r => setTimeout(r, 500 + Math.random() * 400));
+            if (viewing()) {
+                if (i > 0) { showTyping(); await new Promise(r => setTimeout(r, 500 + Math.random() * 400)); }
+                hideTyping();
             }
-            hideTyping();
             const bm = { from: 'them', text: lines[i], ts: Date.now() };
             threadArr.push(bm);
-            appendBubble(bm);
+            if (viewing()) appendBubble(bm);
         }
         saveCfg();
+
+        // ออกจากห้องแล้ว → เด้ง Dynamic Island
+        if (!viewing()) ppIslandNotify(c, lines[0]);
     } catch (e) {
         hideTyping();
         const bm = { from: 'them', text: '(ตอบไม่สำเร็จ — เช็ก SillyTavern)', ts: Date.now() };
         getThread(c.id).push(bm);
-        appendBubble(bm);
+        if (isViewingThread(c.id)) appendBubble(bm);
+        else ppIslandNotify(c, 'ตอบไม่สำเร็จ');
         saveCfg();
         console.error('[pocket-phone] botReply', e);
     } finally {
@@ -463,6 +506,13 @@ function injectPhone() {
         if (e.target.id === 'pp-dialog') ppClose();
     });
 
+    // แตะ Dynamic Island → เปิดห้องแชทที่เด้งเตือน
+    document.getElementById('pp-island')?.addEventListener('click', () => {
+        const island = document.getElementById('pp-island');
+        const id = island && island._targetId;
+        if (island && island.classList.contains('expanded') && id) ppOpenThread(id);
+    });
+
     document.getElementById('pp-frame')?.addEventListener('click', e => {
         const nav = e.target.closest('[data-nav]');
         if (nav) { ppNav(nav.dataset.nav); return; }
@@ -474,17 +524,16 @@ function injectPhone() {
 
     document.getElementById('pp-msg-search')?.addEventListener('input', e => renderContactList(e.target.value));
 
+    // ── input bar: Enter = เว้นบรรทัด · ส่งด้วยปุ่มเท่านั้น ──
     const input = document.getElementById('pp-input');
     const send = document.getElementById('pp-send');
     if (input) {
         input.addEventListener('input', function () {
             this.style.height = 'auto';
-            this.style.height = Math.min(this.scrollHeight, 90) + 'px';
+            this.style.height = Math.min(this.scrollHeight, 120) + 'px';
             send?.classList.toggle('active', this.value.trim().length > 0);
         });
-        input.addEventListener('keydown', e => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ppSendMessage(); }
-        });
+        // ไม่ผูก Enter=ส่ง แล้ว — Enter จะเว้นบรรทัดตามปกติของ textarea
     }
     send?.addEventListener('click', ppSendMessage);
 }
