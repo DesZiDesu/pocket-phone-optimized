@@ -1,12 +1,9 @@
 {
-  "display_name": "iPhone Simulator",
-  "loading_order": 50,
-  "version": "4.0.0",
-  "js": "index.js",
-  "css": "style.css",
-  "author": "iPhone-Sim v4",
-  "homePage": "",
-  "requires": [],
-  "optional": [],
-  "auto_update": true
+    "display_name": "Pocket Phone",
+    "loading_order": 50,
+    "version": "0.1.0-stage1",
+    "js": "index.js",
+    "css": "style.css",
+    "author": "you",
+    "homePage": ""
 }
