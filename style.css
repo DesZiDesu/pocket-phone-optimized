@@ -17,8 +17,7 @@
 #pp-dialog[open] {           /* ★ โชว์เฉพาะตอนเปิด */
     display: flex;
 }
-#pp-dialog::backdrop { background: rgba(0,0,0,.85); backdrop-filter: blur(16px); }
-
+#pp-dialog::backdrop { background: rgba(0,0,0,.9); }
 
 #pp-frame {
     --pp-accent: #0a84ff; --pp-txt: #fff; --pp-txt3: rgba(235,235,245,.6);
