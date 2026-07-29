@@ -1,7 +1,7 @@
 // pocket-phone/index.js — Stage 1b: shell fixes (dvh · island · svg icons · glass)
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.1.2-stage1';
+const PP_VERSION = '0.1.3-stage1';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
