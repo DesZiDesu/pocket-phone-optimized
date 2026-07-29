@@ -1,15 +1,21 @@
-// pocket-phone/index.js — Stage 1b: shell fixes (dvh · island · svg icons · glass)
+// pocket-phone/index.js — Stage 2: store + Messages app
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.1.3-stage1';
+const PP_VERSION = '0.2.0-stage2';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
     try { return SillyTavern.getContext(); } catch { return null; }
 }
 
-// ── store: config เล็ก + mirror localStorage ──
-const DEFAULTS = { theme: 'dark', accent: '#0a84ff', dynamicIsland: true };
+// ── store: config + คอนแทกต์ + ห้องแชท ──
+const DEFAULTS = {
+    theme: 'dark',
+    accent: '#0a84ff',
+    dynamicIsland: true,
+    contacts: [],   // { id, name, avatar }
+    threads: {},    // { [id]: [ { from:'me'|'them', text, ts } ] }
+};
 const LS_MIRROR = 'pp_cfg_mirror';
 
 function getCfg() {
@@ -21,7 +27,7 @@ function getCfg() {
     } else {
         try { cfg = JSON.parse(localStorage.getItem(LS_MIRROR) || '{}'); } catch { cfg = {}; }
     }
-    for (const k of Object.keys(DEFAULTS)) if (cfg[k] === undefined) cfg[k] = DEFAULTS[k];
+    for (const k of Object.keys(DEFAULTS)) if (cfg[k] === undefined) cfg[k] = structuredClone(DEFAULTS[k]);
     return cfg;
 }
 function saveCfg() {
@@ -29,6 +35,9 @@ function saveCfg() {
     try { localStorage.setItem(LS_MIRROR, JSON.stringify(cfg)); } catch {}
     try { if (c && typeof c.saveSettingsDebounced === 'function') c.saveSettingsDebounced(); } catch {}
 }
+
+const esc = s => String(s == null ? '' : s)
+    .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
 
 // ── เวลาจริง ──
 function ppNow() {
@@ -62,18 +71,13 @@ function ppOpen() {
     if (typeof dlg.showModal === 'function' && !dlg.open) dlg.showModal();
     else dlg.setAttribute('open', '');
 }
-
 function ppClose() {
     const dlg = document.getElementById('pp-dialog');
     if (!dlg) return;
     try { document.activeElement?.blur(); } catch {}
-    if (dlg.open && typeof dlg.close === 'function') {
-        dlg.close();          // ปิดแบบถูกวิธี = ออกจาก top layer + เก็บ backdrop ทิ้งเอง
-    } else {
-        dlg.removeAttribute('open'); // ใช้เฉพาะเบราว์เซอร์เก่าที่ไม่มี showModal
-    }
+    if (dlg.open && typeof dlg.close === 'function') dlg.close();
+    else dlg.removeAttribute('open');
 }
-
 
 function applyTheme() {
     const frame = document.getElementById('pp-frame');
@@ -88,13 +92,20 @@ function applyIsland() {
 }
 
 // ── router ──
+let ppActiveContact = null;
 function ppNav(screen) {
     document.querySelectorAll('.pp-screen').forEach(s => s.classList.remove('show'));
-    const home = document.getElementById('pp-home');
-    if (screen === 'home') { if (home) home.classList.add('show'); return; }
+    if (screen === 'home') { document.getElementById('pp-home')?.classList.add('show'); return; }
     const el = document.getElementById('pp-scr-' + screen);
-    if (el) el.classList.add('show');
-    else { if (home) home.classList.add('show'); ppToast('เร็ว ๆ นี้: ' + screen); }
+    if (el) {
+        el.classList.add('show');
+        if (screen === 'messages') renderContactList();
+        if (screen === 'contacts') renderAddContacts();
+        if (screen === 'chat') renderThread();
+    } else {
+        document.getElementById('pp-home')?.classList.add('show');
+        ppToast('เร็ว ๆ นี้: ' + screen);
+    }
 }
 
 function ppToast(msg) {
@@ -106,9 +117,42 @@ function ppToast(msg) {
     t._timer = setTimeout(() => t.classList.remove('show'), 2000);
 }
 
-// ── SVG glyphs (iOS-ish, ไม่มีอิโมจิ) ──
+// ── avatar helper ──
+function contactAvatarHTML(c, size) {
+    const s = size || 52;
+    if (c.avatar) {
+        return `<img class="pp-avatar" style="width:${s}px;height:${s}px"
+            src="${esc(c.avatar)}" onerror="this.replaceWith(document.createRange().createContextualFragment('<span class=\\'pp-avatar pp-avatar-fb\\' style=\\'width:${s}px;height:${s}px\\'>${esc((c.name||'?')[0])}</span>'))">`;
+    }
+    return `<span class="pp-avatar pp-avatar-fb" style="width:${s}px;height:${s}px">${esc((c.name || '?')[0])}</span>`;
+}
+
+// ── contacts / threads data ──
+function getContacts() { return getCfg().contacts; }
+function getThread(id) {
+    const cfg = getCfg();
+    if (!cfg.threads[id]) cfg.threads[id] = [];
+    return cfg.threads[id];
+}
+
+// ── pull characters from ST ──
+function listStCharacters() {
+    const c = ctx();
+    if (c && Array.isArray(c.characters) && c.characters.length) {
+        return c.characters
+            .filter(ch => ch && ch.name && !ch.is_user)
+            .map(ch => ({
+                id: ch.avatar || ch.name,
+                name: ch.name,
+                avatar: ch.avatar ? `/characters/${ch.avatar}` : '',
+            }));
+    }
+    return [];
+}
+
+// ── SVG glyphs ──
 const ICON = {
-    story: `<svg viewBox="0 0 24 24" fill="#fff"><path d="M12 6.2C10.5 5 8.4 4.5 6 4.5c-.8 0-1.5.6-1.5 1.4v11c0 .8.7 1.4 1.5 1.4 2.1 0 4 .5 5.3 1.5.4.3 1 .3 1.4 0 1.3-1 3.2-1.5 5.3-1.5.8 0 1.5-.6 1.5-1.4v-11c0-.8-.7-1.4-1.5-1.4-2.4 0-4.5.5-6 1.7zm0 0v12" stroke="#fff" stroke-width="1.3" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    story: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2C10.5 5 8.4 4.5 6 4.5c-.8 0-1.5.6-1.5 1.4v11c0 .8.7 1.4 1.5 1.4 2.1 0 4 .5 5.3 1.5.4.3 1 .3 1.4 0 1.3-1 3.2-1.5 5.3-1.5.8 0 1.5-.6 1.5-1.4v-11c0-.8-.7-1.4-1.5-1.4-2.4 0-4.5.5-6 1.7zM12 6.2v12"/></svg>`,
     messages: `<svg viewBox="0 0 24 24" fill="#fff"><path d="M12 3C6.9 3 3 6.6 3 11c0 2.3 1.1 4.4 2.9 5.8-.2 1.3-.8 2.5-1.6 3.4-.2.2 0 .6.3.5 1.9-.3 3.4-1 4.4-1.6 1 .3 2 .4 3 .4 5.1 0 9-3.6 9-8s-3.9-8-9-8z"/></svg>`,
     feed: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>`,
     wallet: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.5"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M3 10h18" stroke-width="1.8"/><circle cx="17" cy="14.5" r="1.1" fill="#fff" stroke="none"/></svg>`,
@@ -116,6 +160,10 @@ const ICON = {
     signal: `<svg viewBox="0 0 18 12" fill="currentColor"><rect x="0" y="8" width="3" height="4" rx=".7"/><rect x="5" y="5.5" width="3" height="6.5" rx=".7"/><rect x="10" y="3" width="3" height="9" rx=".7"/><rect x="15" y="0" width="3" height="12" rx=".7"/></svg>`,
     wifi: `<svg viewBox="0 0 24 18" fill="currentColor"><path d="M12 3C8 3 4.4 4.6 1.8 7.2l1.8 1.8C5.8 6.8 8.7 5.5 12 5.5s6.2 1.3 8.4 3.5l1.8-1.8C19.6 4.6 16 3 12 3zm0 6c-2 0-3.8.8-5.1 2.1l1.8 1.8C9.5 12.1 10.7 11.5 12 11.5s2.5.6 3.3 1.4l1.8-1.8A7.2 7.2 0 0 0 12 9zm0 5.5-2.1 2.1c.6.6 1.4.9 2.1.9s1.5-.3 2.1-.9L12 14.5z"/></svg>`,
     battery: `<svg viewBox="0 0 26 12" fill="none"><rect x=".5" y=".5" width="21" height="11" rx="3" stroke="currentColor" stroke-opacity=".4"/><rect x="2" y="2" width="16" height="8" rx="1.5" fill="currentColor"/><rect x="23" y="4" width="1.8" height="4" rx=".9" fill="currentColor" fill-opacity=".4"/></svg>`,
+    back: `<svg viewBox="0 0 12 20" width="11" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10l8 8"/></svg>`,
+    compose: `<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>`,
+    send: `<svg viewBox="0 0 24 24" width="17" height="17" fill="#fff"><path d="M4 12l16-8-6 8 6 8z" transform="rotate(0)"/><path d="M3.4 20.4 21 12 3.4 3.6 3 10l12 2-12 2z"/></svg>`,
+    add: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z"/></svg>`,
 };
 
 const APPS = [
@@ -139,18 +187,58 @@ function buildPhone() {
     <div id="pp-statusbar">
       <span class="pp-sb-left pp-clock">9:41</span>
       <div id="pp-island"></div>
-      <span class="pp-sb-right">
-        ${ICON.signal}${ICON.wifi}${ICON.battery}
-        <button id="pp-close-btn" title="Close">✕</button>
-      </span>
+      <span class="pp-sb-right">${ICON.signal}${ICON.wifi}${ICON.battery}
+        <button id="pp-close-btn" title="Close">✕</button></span>
     </div>
 
     <div id="pp-screens">
+      <!-- HOME -->
       <div class="pp-screen show" id="pp-home">
         <div class="pp-home-clock pp-clock">9:41</div>
         <div id="pp-home-date">Saturday, May 17</div>
         <div style="flex:1"></div>
         <div class="pp-grid">${grid}</div>
+        <div class="pp-home-bar"></div>
+      </div>
+
+      <!-- MESSAGES -->
+      <div class="pp-screen" id="pp-scr-messages">
+        <div class="pp-nav">
+          <button class="pp-nav-back" data-nav="home">${ICON.back}</button>
+          <span class="pp-nav-title">Messages</span>
+          <button class="pp-nav-action" data-nav="contacts">${ICON.compose}</button>
+        </div>
+        <div class="pp-search-wrap"><input class="pp-search" id="pp-msg-search" placeholder="ค้นหา"></div>
+        <div class="pp-list" id="pp-contact-list"></div>
+        <div class="pp-home-bar"></div>
+      </div>
+
+      <!-- ADD CONTACT -->
+      <div class="pp-screen" id="pp-scr-contacts">
+        <div class="pp-nav">
+          <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
+          <span class="pp-nav-title">เพิ่มคนคุย</span>
+          <span style="width:34px"></span>
+        </div>
+        <div class="pp-list" id="pp-add-list"></div>
+        <div class="pp-home-bar"></div>
+      </div>
+
+      <!-- CHAT -->
+      <div class="pp-screen" id="pp-scr-chat">
+        <div class="pp-chat-header" id="pp-chat-header">
+          <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
+          <div class="pp-chat-hdr-center">
+            <span id="pp-chat-hdr-av"></span>
+            <span class="pp-chat-hdr-name" id="pp-chat-hdr-name">Contact</span>
+          </div>
+          <span style="width:34px"></span>
+        </div>
+        <div class="pp-msgs" id="pp-msgs"></div>
+        <div class="pp-inputbar">
+          <textarea class="pp-input" id="pp-input" rows="1" placeholder="ข้อความ"></textarea>
+          <button class="pp-send" id="pp-send">${ICON.send}</button>
+        </div>
         <div class="pp-home-bar"></div>
       </div>
     </div>
@@ -160,6 +248,105 @@ function buildPhone() {
 </dialog>`;
 }
 
+// ── renders ──
+function renderContactList(filter) {
+    const list = document.getElementById('pp-contact-list');
+    if (!list) return;
+    let contacts = getContacts();
+    if (filter) contacts = contacts.filter(c => (c.name || '').toLowerCase().includes(filter.toLowerCase()));
+    if (!contacts.length) {
+        list.innerHTML = `<div class="pp-empty">ยังไม่มีคนคุย<br><span>แตะปุ่มมุมขวาบนเพื่อเพิ่ม</span></div>`;
+        return;
+    }
+    list.innerHTML = contacts.map(c => {
+        const th = getThread(c.id);
+        const last = th[th.length - 1];
+        const preview = last ? last.text : 'แตะเพื่อเริ่มแชท';
+        return `<div class="pp-row" data-cid="${esc(c.id)}">
+            ${contactAvatarHTML(c, 52)}
+            <div class="pp-row-meta">
+                <div class="pp-row-name">${esc(c.name)}</div>
+                <div class="pp-row-preview">${esc(preview)}</div>
+            </div>
+        </div>`;
+    }).join('');
+}
+
+function renderAddContacts() {
+    const list = document.getElementById('pp-add-list');
+    if (!list) return;
+    const chars = listStCharacters();
+    const added = new Set(getContacts().map(c => c.id));
+    if (!chars.length) {
+        list.innerHTML = `<div class="pp-empty">ไม่พบตัวละครใน SillyTavern<br><span>ลองโหลดตัวละครก่อน</span></div>`;
+        return;
+    }
+    list.innerHTML = chars.map(c => `<div class="pp-row">
+        ${contactAvatarHTML(c, 48)}
+        <div class="pp-row-meta"><div class="pp-row-name">${esc(c.name)}</div></div>
+        ${added.has(c.id)
+            ? `<span class="pp-added">เพิ่มแล้ว</span>`
+            : `<button class="pp-add-btn" data-add="${esc(c.id)}">เพิ่ม</button>`}
+    </div>`).join('');
+}
+
+function renderThread() {
+    const c = ppActiveContact;
+    if (!c) { ppNav('messages'); return; }
+    const name = document.getElementById('pp-chat-hdr-name');
+    if (name) name.textContent = c.name;
+    const avSlot = document.getElementById('pp-chat-hdr-av');
+    if (avSlot) avSlot.innerHTML = contactAvatarHTML(c, 30);
+    const msgs = document.getElementById('pp-msgs');
+    if (!msgs) return;
+    const th = getThread(c.id);
+    if (!th.length) {
+        msgs.innerHTML = `<div class="pp-sys">เริ่มบทสนทนา</div>`;
+    } else {
+        msgs.innerHTML = th.map(m =>
+            `<div class="pp-brow ${m.from === 'me' ? 'out' : 'in'}">
+                <div class="pp-bubble">${esc(m.text)}</div>
+            </div>`).join('');
+    }
+    msgs.scrollTop = msgs.scrollHeight;
+}
+
+function ppOpenThread(id) {
+    const c = getContacts().find(x => x.id === id);
+    if (!c) return;
+    ppActiveContact = c;
+    ppNav('chat');
+}
+
+function ppAddContact(id) {
+    const c = listStCharacters().find(x => x.id === id);
+    if (!c) return;
+    const cfg = getCfg();
+    if (!cfg.contacts.find(x => x.id === id)) {
+        cfg.contacts.push(c);
+        saveCfg();
+        ppToast(`เพิ่ม ${c.name} แล้ว`);
+        renderAddContacts();
+    }
+}
+
+function ppSendMessage() {
+    const c = ppActiveContact;
+    if (!c) return;
+    const input = document.getElementById('pp-input');
+    const text = (input.value || '').trim();
+    if (!text) return;
+    input.value = '';
+    input.style.height = 'auto';
+    document.getElementById('pp-send')?.classList.remove('active');
+    const th = getThread(c.id);
+    th.push({ from: 'me', text, ts: Date.now() });
+    saveCfg();
+    renderThread();
+    // NOTE: การให้บอทตอบ = Stage 3
+}
+
+// ── inject ──
 function injectPhone() {
     if (document.getElementById('pp-dialog')) return;
     const holder = document.createElement('div');
@@ -167,11 +354,37 @@ function injectPhone() {
     document.body.appendChild(holder.firstElementChild);
 
     document.getElementById('pp-close-btn')?.addEventListener('click', ppClose);
-    document.querySelectorAll('#pp-frame .pp-app').forEach(btn =>
-        btn.addEventListener('click', () => ppNav(btn.dataset.nav)));
     document.getElementById('pp-dialog')?.addEventListener('click', e => {
         if (e.target.id === 'pp-dialog') ppClose();
     });
+
+    // delegated nav (ไอคอนแอป + ปุ่มย้อน + ปุ่ม action)
+    document.getElementById('pp-frame')?.addEventListener('click', e => {
+        const nav = e.target.closest('[data-nav]');
+        if (nav) { ppNav(nav.dataset.nav); return; }
+        const add = e.target.closest('[data-add]');
+        if (add) { ppAddContact(add.dataset.add); return; }
+        const row = e.target.closest('.pp-row[data-cid]');
+        if (row) { ppOpenThread(row.dataset.cid); return; }
+    });
+
+    // search
+    document.getElementById('pp-msg-search')?.addEventListener('input', e => renderContactList(e.target.value));
+
+    // input bar
+    const input = document.getElementById('pp-input');
+    const send = document.getElementById('pp-send');
+    if (input) {
+        input.addEventListener('input', function () {
+            this.style.height = 'auto';
+            this.style.height = Math.min(this.scrollHeight, 90) + 'px';
+            send?.classList.toggle('active', this.value.trim().length > 0);
+        });
+        input.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ppSendMessage(); }
+        });
+    }
+    send?.addEventListener('click', ppSendMessage);
 }
 
 function injectFab() {
@@ -228,9 +441,8 @@ window.PP_DIAG = function () {
     const c = ctx();
     const rows = {
         version: PP_VERSION, loaded: window.PP_LOADED, contextOk: !!c,
+        chars: listStCharacters().length, contacts: getContacts().length,
         dialogInDom: !!document.getElementById('pp-dialog'),
-        fabInDom: !!document.getElementById('pp-fab'),
-        panelInDom: !!document.getElementById('pp-settings-panel'),
         theme: getCfg().theme, island: getCfg().dynamicIsland,
     };
     console.table(rows);
