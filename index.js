@@ -62,13 +62,18 @@ function ppOpen() {
     if (typeof dlg.showModal === 'function' && !dlg.open) dlg.showModal();
     else dlg.setAttribute('open', '');
 }
+
 function ppClose() {
     const dlg = document.getElementById('pp-dialog');
     if (!dlg) return;
     try { document.activeElement?.blur(); } catch {}
-    if (typeof dlg.close === 'function' && dlg.open) dlg.close();
-    dlg.removeAttribute('open'); // fallback กันค้างทุกกรณี
+    if (dlg.open && typeof dlg.close === 'function') {
+        dlg.close();          // ปิดแบบถูกวิธี = ออกจาก top layer + เก็บ backdrop ทิ้งเอง
+    } else {
+        dlg.removeAttribute('open'); // ใช้เฉพาะเบราว์เซอร์เก่าที่ไม่มี showModal
+    }
 }
+
 
 function applyTheme() {
     const frame = document.getElementById('pp-frame');
