@@ -1,5 +1,54 @@
-/* iPhone Simulator v4.0 - style.css */
-/* All CSS is injected dynamically via index.js */
-.isim-st-panel {
-    margin-bottom: 5px;
+/* pocket-phone/style.css — Stage 1 */
+#pp-fab { cursor: pointer; font-size: 20px; padding: 4px 6px; border-radius: 8px;
+    background: transparent; border: none; color: inherit; }
+.pp-fab-float { position: fixed !important; bottom: 80px; right: 16px; z-index: 2147483646;
+    width: 52px; height: 52px; border-radius: 50%; font-size: 24px;
+    background: linear-gradient(145deg, #1c1c1e, #3a3a3c) !important; color: #fff;
+    box-shadow: 0 4px 20px rgba(0,0,0,.6); }
+
+#pp-dialog { padding: 0; border: none; background: transparent; max-width: 100vw; max-height: 100vh; }
+#pp-dialog::backdrop { background: rgba(0,0,0,.85); backdrop-filter: blur(16px); }
+
+#pp-frame { --pp-accent: #0a84ff; --pp-bg: #000; --pp-txt: #fff; --pp-bg3: #1c1c1e; --pp-sep: #38383a;
+    width: 393px; height: 852px; max-height: 96vh; border-radius: 46px; overflow: hidden;
+    display: flex; flex-direction: column; position: relative; background: var(--pp-bg);
+    color: var(--pp-txt); font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    box-shadow: 0 0 0 11px #1a1a1a, 0 0 0 13px #111, 0 40px 100px rgba(0,0,0,.9); }
+#pp-frame.light { --pp-bg: #f2f2f7; --pp-txt: #000; --pp-bg3: #e5e5ea; --pp-sep: #c6c6c8; }
+
+#pp-island { position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    width: 118px; height: 34px; background: #000; border-radius: 20px; z-index: 50; }
+
+#pp-statusbar { height: 54px; display: flex; align-items: flex-end; justify-content: space-between;
+    padding: 0 26px 8px; flex-shrink: 0; font-size: 15px; font-weight: 700; }
+.pp-sb-right { display: flex; align-items: center; gap: 10px; }
+#pp-close-btn { background: rgba(128,128,128,.25); border: none; border-radius: 50%;
+    width: 22px; height: 22px; color: inherit; font-size: 11px; cursor: pointer; }
+
+#pp-screens { flex: 1; position: relative; overflow: hidden; }
+.pp-screen { position: absolute; inset: 0; display: none; flex-direction: column; }
+.pp-screen.show { display: flex; }
+
+#pp-home { padding: 8px 0 0; align-items: stretch; }
+.pp-home-clock { font-size: 82px; font-weight: 200; text-align: center; letter-spacing: -4px; line-height: 1; }
+#pp-home-date { font-size: 17px; opacity: .7; text-align: center; margin-top: 2px; }
+.pp-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 22px; padding: 20px 24px; }
+.pp-app { background: none; border: none; cursor: pointer; display: flex; flex-direction: column;
+    align-items: center; gap: 6px; color: inherit; }
+.pp-app:active { transform: scale(.9); }
+.pp-icon { width: 60px; height: 60px; border-radius: 15px; display: flex; align-items: center;
+    justify-content: center; font-size: 28px; box-shadow: 0 4px 14px rgba(0,0,0,.4); }
+.pp-label { font-size: 11px; opacity: .9; }
+.pp-home-bar { width: 134px; height: 5px; border-radius: 3px; background: rgba(128,128,128,.5);
+    margin: 4px auto 10px; }
+
+#pp-toast { position: absolute; bottom: 90px; left: 50%; transform: translateX(-50%);
+    background: rgba(40,40,42,.95); color: #fff; padding: 9px 18px; border-radius: 20px;
+    font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 100;
+    backdrop-filter: blur(20px); white-space: nowrap; }
+#pp-toast.show { opacity: 1; }
+
+@media (max-width: 480px) {
+    #pp-frame { width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; box-shadow: none; }
+    #pp-island { display: none !important; }
 }
