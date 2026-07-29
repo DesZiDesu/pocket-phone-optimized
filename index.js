@@ -65,8 +65,9 @@ function ppOpen() {
 function ppClose() {
     const dlg = document.getElementById('pp-dialog');
     if (!dlg) return;
+    try { document.activeElement?.blur(); } catch {}
     if (typeof dlg.close === 'function' && dlg.open) dlg.close();
-    else dlg.removeAttribute('open');
+    dlg.removeAttribute('open'); // fallback กันค้างทุกกรณี
 }
 
 function applyTheme() {
