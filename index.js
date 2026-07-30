@@ -1,18 +1,28 @@
-// pocket-phone/index.js — Stage 4: glass home · new input · Dynamic Island live activity
+// pocket-phone/index.js — Stage 5: persistent typing state · chat UI polish · wallpaper · squircle icons
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.4.0-stage4';
+const PP_VERSION = '0.5.0-stage5';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
     try { return SillyTavern.getContext(); } catch { return null; }
 }
 
+// ── wallpapers ──
+const WALLPAPERS = {
+    aurora: 'radial-gradient(38% 26% at 22% 15%, rgba(94,92,230,.55), transparent 72%), radial-gradient(40% 26% at 84% 22%, rgba(255,159,10,.4), transparent 72%), radial-gradient(46% 32% at 50% 92%, rgba(52,199,89,.34), transparent 72%), radial-gradient(40% 28% at 88% 82%, rgba(191,90,242,.34), transparent 72%), linear-gradient(160deg,#0a0a12,#050506)',
+    ocean: 'radial-gradient(50% 40% at 30% 18%, rgba(10,132,255,.5), transparent 70%), radial-gradient(52% 42% at 82% 82%, rgba(48,209,88,.3), transparent 72%), linear-gradient(160deg,#04121f,#010409)',
+    sunset: 'radial-gradient(60% 45% at 50% 14%, rgba(255,159,10,.5), transparent 72%), radial-gradient(55% 40% at 18% 90%, rgba(255,55,95,.42), transparent 72%), radial-gradient(50% 40% at 92% 70%, rgba(191,90,242,.35), transparent 72%), linear-gradient(160deg,#1a0a12,#0a0406)',
+    forest: 'radial-gradient(55% 45% at 25% 20%, rgba(52,199,89,.45), transparent 72%), radial-gradient(50% 40% at 85% 82%, rgba(10,132,255,.28), transparent 72%), linear-gradient(160deg,#08120a,#040604)',
+    mono: 'radial-gradient(70% 55% at 50% 0%, #1e1e26, #050506 72%)',
+};
+
 // ── store ──
 const DEFAULTS = {
     theme: 'dark',
     accent: '#0a84ff',
     dynamicIsland: true,
+    wallpaper: 'aurora',
     contacts: [],   // { id, name, avatar }
     threads: {},    // { [id]: [ { from:'me'|'them', text, ts } ] }
 };
@@ -39,7 +49,6 @@ function saveCfg() {
 const esc = s => String(s == null ? '' : s)
     .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
 
-// ── clean CoT / junk ──
 function cleanReply(t) {
     let s = String(t || '');
     s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
@@ -82,7 +91,7 @@ function startClock() {
 function ppOpen() {
     const dlg = document.getElementById('pp-dialog');
     if (!dlg) return;
-    applyTheme(); applyIsland(); startClock();
+    applyTheme(); applyIsland(); applyWallpaper(); startClock();
     if (typeof dlg.showModal === 'function' && !dlg.open) dlg.showModal();
     else dlg.setAttribute('open', '');
 }
@@ -105,11 +114,18 @@ function applyIsland() {
     const island = document.getElementById('pp-island');
     if (island) island.style.display = getCfg().dynamicIsland ? 'flex' : 'none';
 }
+function applyWallpaper() {
+    const el = document.getElementById('pp-home-wp');
+    if (!el) return;
+    const wp = getCfg().wallpaper || 'aurora';
+    el.style.background = WALLPAPERS[wp] || WALLPAPERS.aurora;
+}
 
 // ── router ──
 let ppActiveContact = null;
-let ppIsTyping = false;
+let ppGeneratingId = null;   // id ของคอนแทกต์ที่บอทกำลังคิดคำตอบ (null = ว่าง)
 let ppCurrentScreen = 'home';
+
 function ppNav(screen) {
     ppCurrentScreen = screen;
     document.querySelectorAll('.pp-screen').forEach(s => s.classList.remove('show'));
@@ -176,12 +192,12 @@ function getContactPersona(id) {
     return ch ? (ch.persona || '') : '';
 }
 
-// ── SVG glyphs (app icons ใช้ currentColor เพื่อทำ liquid glass) ──
+// ── SVG glyphs ──
 const ICON = {
-    story: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2C10.5 5 8.4 4.5 6 4.5c-.8 0-1.5.6-1.5 1.4v11c0 .8.7 1.4 1.5 1.4 2.1 0 4 .5 5.3 1.5.4.3 1 .3 1.4 0 1.3-1 3.2-1.5 5.3-1.5.8 0 1.5-.6 1.5-1.4v-11c0-.8-.7-1.4-1.5-1.4-2.4 0-4.5.5-6 1.7zM12 6.2v12"/></svg>`,
+    story: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2C10.5 5 8.4 4.5 6 4.5c-.8 0-1.5.6-1.5 1.4v11c0 .8.7 1.4 1.5 1.4 2.1 0 4 .5 5.3 1.5.4.3 1 .3 1.4 0 1.3-1 3.2-1.5 5.3-1.5.8 0 1.5-.6 1.5-1.4v-11c0-.8-.7-1.4-1.5-1.4-2.4 0-4.5.5-6 1.7zM12 6.2v12"/></svg>`,
     messages: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C6.9 3 3 6.6 3 11c0 2.3 1.1 4.4 2.9 5.8-.2 1.3-.8 2.5-1.6 3.4-.2.2 0 .6.3.5 1.9-.3 3.4-1 4.4-1.6 1 .3 2 .4 3 .4 5.1 0 9-3.6 9-8s-3.9-8-9-8z"/></svg>`,
-    feed: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>`,
-    wallet: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M3 10h18" stroke-width="1.9"/><circle cx="17" cy="14.5" r="1.1" fill="currentColor" stroke="none"/></svg>`,
+    feed: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>`,
+    wallet: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M3 10h18" stroke-width="2"/><circle cx="17" cy="14.5" r="1.1" fill="currentColor" stroke="none"/></svg>`,
     settings: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M19.14 12.94c.04-.3.06-.61.06-.94s-.02-.64-.07-.94l2.03-1.58a.5.5 0 0 0 .12-.61l-1.92-3.32a.5.5 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54A.49.49 0 0 0 13.5 2h-3c-.24 0-.44.17-.47.41l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.59.22L2.74 8.87a.5.5 0 0 0 .12.61l2.03 1.58c-.05.3-.07.63-.07.94s.02.64.07.94L2.86 14.52a.5.5 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.03.24.23.41.47.41h3c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32a.5.5 0 0 0-.12-.61l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z"/></svg>`,
     signal: `<svg viewBox="0 0 18 12" fill="currentColor"><rect x="0" y="8" width="3" height="4" rx=".7"/><rect x="5" y="5.5" width="3" height="6.5" rx=".7"/><rect x="10" y="3" width="3" height="9" rx=".7"/><rect x="15" y="0" width="3" height="12" rx=".7"/></svg>`,
     wifi: `<svg viewBox="0 0 24 18" fill="currentColor"><path d="M12 3C8 3 4.4 4.6 1.8 7.2l1.8 1.8C5.8 6.8 8.7 5.5 12 5.5s6.2 1.3 8.4 3.5l1.8-1.8C19.6 4.6 16 3 12 3zm0 6c-2 0-3.8.8-5.1 2.1l1.8 1.8C9.5 12.1 10.7 11.5 12 11.5s2.5.6 3.3 1.4l1.8-1.8A7.2 7.2 0 0 0 12 9zm0 5.5-2.1 2.1c.6.6 1.4.9 2.1.9s1.5-.3 2.1-.9L12 14.5z"/></svg>`,
@@ -217,8 +233,9 @@ function buildPhone() {
     </div>
 
     <div id="pp-screens">
-      <!-- HOME (liquid glass) -->
+      <!-- HOME -->
       <div class="pp-screen show" id="pp-home">
+        <div id="pp-home-wp"></div>
         <div class="pp-home-clock pp-clock">9:41</div>
         <div id="pp-home-date">Saturday, May 17</div>
         <div style="flex:1"></div>
@@ -261,7 +278,7 @@ function buildPhone() {
         </div>
         <div class="pp-msgs" id="pp-msgs"></div>
         <div class="pp-inputbar">
-          <textarea class="pp-input" id="pp-input" rows="1" placeholder="ข้อความ  ·  Enter ส่ง · Shift+Enter ขึ้นบรรทัด"></textarea>
+          <textarea class="pp-input" id="pp-input" rows="1" placeholder="ข้อความ"></textarea>
           <button class="pp-gen" id="pp-gen" title="ให้บอทตอบ">${ICON.generate}</button>
         </div>
         <div class="pp-home-bar"></div>
@@ -286,12 +303,13 @@ function renderContactList(filter) {
     list.innerHTML = contacts.map(c => {
         const th = getThread(c.id);
         const last = th[th.length - 1];
-        const preview = last ? last.text : 'แตะเพื่อเริ่มแชท';
+        const typing = ppGeneratingId === c.id;
+        const preview = typing ? 'กำลังพิมพ์…' : (last ? last.text : 'แตะเพื่อเริ่มแชท');
         return `<div class="pp-row" data-cid="${esc(c.id)}">
             ${contactAvatarHTML(c, 52)}
             <div class="pp-row-meta">
                 <div class="pp-row-name">${esc(c.name)}</div>
-                <div class="pp-row-preview">${esc(preview)}</div>
+                <div class="pp-row-preview${typing ? ' pp-preview-typing' : ''}">${esc(preview)}</div>
             </div>
         </div>`;
     }).join('');
@@ -315,11 +333,12 @@ function renderAddContacts() {
     </div>`).join('');
 }
 
-function bubbleHTML(m) {
-    return `<div class="pp-brow ${m.from === 'me' ? 'out' : 'in'}">
-        <div class="pp-bubble">${esc(m.text)}</div>
+function browHTML(m, grouped, tail) {
+    return `<div class="pp-brow ${m.from === 'me' ? 'out' : 'in'}${grouped ? ' grp' : ''}" data-from="${m.from}">
+        <div class="pp-bubble${tail ? ' tail' : ''}">${esc(m.text)}</div>
     </div>`;
 }
+
 function renderThread() {
     const c = ppActiveContact;
     if (!c) { ppNav('messages'); return; }
@@ -327,19 +346,36 @@ function renderThread() {
     if (name) name.textContent = c.name;
     const avSlot = document.getElementById('pp-chat-hdr-av');
     if (avSlot) avSlot.innerHTML = contactAvatarHTML(c, 30);
+    const status = document.getElementById('pp-chat-hdr-name')?.nextElementSibling; // (ไม่มี status แยก)
     const msgs = document.getElementById('pp-msgs');
     if (!msgs) return;
     const th = getThread(c.id);
-    msgs.innerHTML = th.length ? th.map(bubbleHTML).join('') : `<div class="pp-sys">เริ่มบทสนทนา</div>`;
+    if (!th.length) {
+        msgs.innerHTML = `<div class="pp-sys">เริ่มบทสนทนา</div>`;
+    } else {
+        msgs.innerHTML = th.map((m, i) => {
+            const prev = th[i - 1], next = th[i + 1];
+            const grouped = prev && prev.from === m.from;
+            const tail = !next || next.from !== m.from;
+            return browHTML(m, grouped, tail);
+        }).join('');
+    }
+    if (ppGeneratingId === c.id) showTyping();
     msgs.scrollTop = msgs.scrollHeight;
 }
+
 function appendBubble(m) {
     const msgs = document.getElementById('pp-msgs');
     if (!msgs) return;
     msgs.querySelector('.pp-sys')?.remove();
-    msgs.insertAdjacentHTML('beforeend', bubbleHTML(m));
+    const rows = [...msgs.querySelectorAll('.pp-brow')];
+    const last = rows[rows.length - 1];
+    const grouped = last && last.dataset.from === m.from;
+    if (grouped) last.querySelector('.pp-bubble')?.classList.remove('tail');
+    msgs.insertAdjacentHTML('beforeend', browHTML(m, grouped, true));
     msgs.scrollTop = msgs.scrollHeight;
 }
+
 function showTyping() {
     const msgs = document.getElementById('pp-msgs');
     if (!msgs || document.getElementById('pp-typing')) return;
@@ -348,6 +384,29 @@ function showTyping() {
     msgs.scrollTop = msgs.scrollHeight;
 }
 function hideTyping() { document.getElementById('pp-typing')?.remove(); }
+
+// ── Dynamic Island typing activity (คงอยู่จนเจนเสร็จ) ──
+function islandTyping(c) {
+    const island = document.getElementById('pp-island');
+    if (!island || !getCfg().dynamicIsland) return;
+    island.dataset.cid = c.id;
+    island.innerHTML = `${islandAvatarHTML(c)}<div class="pp-island-body">
+        <div class="pp-island-name">${esc(c.name)}</div>
+        <div class="pp-island-typing"><span></span><span></span><span></span></div></div>`;
+    void island.offsetWidth;
+    requestAnimationFrame(() => island.classList.add('pp-island-live'));
+}
+function collapseIsland() {
+    const island = document.getElementById('pp-island');
+    if (!island) return;
+    island.classList.remove('pp-island-live');
+    setTimeout(() => {
+        if (!island.classList.contains('pp-island-live')) {
+            island.innerHTML = '';
+            delete island.dataset.cid;
+        }
+    }, 560);
+}
 
 function ppOpenThread(id) {
     const c = getContacts().find(x => x.id === id);
@@ -367,30 +426,6 @@ function ppAddContact(id) {
     }
 }
 
-// ── Dynamic Island live activity ──
-function islandLiveActivity(c, text) {
-    const island = document.getElementById('pp-island');
-    if (!island) return;
-    if (!getCfg().dynamicIsland) { ppToast(`${c.name}: ${text}`); return; }
-    clearTimeout(island._t);
-    island.dataset.cid = c.id;
-    island.innerHTML = `${islandAvatarHTML(c)}<div class="pp-island-body">
-        <div class="pp-island-name">${esc(c.name)}</div>
-        <div class="pp-island-msg">${esc(text)}</div></div>`;
-    // reflow แล้วค่อยพองออก เพื่อให้ transition ทำงานลื่น
-    void island.offsetWidth;
-    requestAnimationFrame(() => island.classList.add('pp-island-live'));
-    island._t = setTimeout(() => {
-        island.classList.remove('pp-island-live');
-        setTimeout(() => {
-            if (!island.classList.contains('pp-island-live')) {
-                island.innerHTML = '';
-                delete island.dataset.cid;
-            }
-        }, 560);
-    }, 4500);
-}
-
 // ── input actions ──
 function ppSendUserMessage() {
     const c = ppActiveContact;
@@ -408,20 +443,26 @@ function ppSendUserMessage() {
     return true;
 }
 
+function ppViewing(c) {
+    return ppCurrentScreen === 'chat' && ppActiveContact && ppActiveContact.id === c.id;
+}
+
 async function ppGenerateReply() {
     const c = ppActiveContact;
-    if (!c || ppIsTyping) return;
+    if (!c || ppGeneratingId) return;
     const input = document.getElementById('pp-input');
     if (input && input.value.trim()) ppSendUserMessage(); // flush ตัวหนังสือค้าง
     if (!getThread(c.id).some(m => m.from === 'me')) {
         ppToast('พิมพ์ข้อความก่อน แล้วค่อยกดให้บอทตอบ');
         return;
     }
-    ppIsTyping = true;
+    ppGeneratingId = c.id;
     const genBtn = document.getElementById('pp-gen');
     if (genBtn) genBtn.disabled = true;
-    const viewingNow = () => ppCurrentScreen === 'chat' && ppActiveContact && ppActiveContact.id === c.id;
-    if (viewingNow()) showTyping();
+    if (ppViewing(c)) showTyping();
+    islandTyping(c);
+    renderContactList();
+
     try {
         const context = ctx();
         const userName = getUserName();
@@ -457,33 +498,22 @@ async function ppGenerateReply() {
         if (!lines.length) lines.push('...');
 
         const threadArr = getThread(c.id);
-        const shownBubbles = viewingNow(); // ล็อกสถานะครั้งเดียวหลังเจนเสร็จ
         for (let i = 0; i < lines.length; i++) {
-            const bm = { from: 'them', text: lines[i], ts: Date.now() };
-            threadArr.push(bm);
-            if (shownBubbles) {
-                if (i > 0) { showTyping(); await new Promise(r => setTimeout(r, 450 + Math.random() * 350)); }
-                hideTyping();
-                appendBubble(bm);
-            }
-        }
-        saveCfg();
-        if (!shownBubbles) {
-            hideTyping();
-            renderContactList();          // อัปเดต preview ในหน้ารายชื่อ
-            islandLiveActivity(c, lines[0]); // เด้งเข้า Dynamic Island
+            await new Promise(r => setTimeout(r, i === 0 ? 300 : 500 + Math.random() * 400));
+            threadArr.push({ from: 'them', text: lines[i], ts: Date.now() });
+            saveCfg();
+            if (ppViewing(c)) renderThread(); // rebuild + typing (ยังเจนอยู่)
         }
     } catch (e) {
-        hideTyping();
-        const bm = { from: 'them', text: '(ตอบไม่สำเร็จ — เช็ก SillyTavern)', ts: Date.now() };
-        getThread(c.id).push(bm);
+        getThread(c.id).push({ from: 'them', text: '(ตอบไม่สำเร็จ — เช็ก SillyTavern)', ts: Date.now() });
         saveCfg();
-        if (viewingNow()) appendBubble(bm);
         console.error('[pocket-phone] generate', e);
     } finally {
+        ppGeneratingId = null;
         hideTyping();
-        ppIsTyping = false;
+        collapseIsland();
         if (genBtn) genBtn.disabled = false;
+        if (ppViewing(c)) renderThread(); else renderContactList();
     }
 }
 
@@ -501,14 +531,7 @@ function injectPhone() {
 
     document.getElementById('pp-frame')?.addEventListener('click', e => {
         const island = e.target.closest('#pp-island');
-        if (island && island.classList.contains('pp-island-live') && island.dataset.cid) {
-            const cid = island.dataset.cid;
-            clearTimeout(island._t);
-            island.classList.remove('pp-island-live');
-            setTimeout(() => { island.innerHTML = ''; delete island.dataset.cid; }, 300);
-            ppOpenThread(cid);
-            return;
-        }
+        if (island && island.dataset.cid) { ppOpenThread(island.dataset.cid); return; }
         const nav = e.target.closest('[data-nav]');
         if (nav) { ppNav(nav.dataset.nav); return; }
         const add = e.target.closest('[data-add]');
@@ -529,7 +552,7 @@ function injectPhone() {
         input.addEventListener('keydown', e => {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();
-                ppSendUserMessage(); // Enter = ส่งข้อความของผู้ใช้ (ยังไม่ให้บอทตอบ)
+                ppSendUserMessage(); // Enter = ส่งข้อความของผู้ใช้ (บอทยังไม่ตอบ)
             }
         });
     }
@@ -564,7 +587,9 @@ function registerSettingsPanel() {
   <div class="inline-drawer-content">
     <div style="font-size:12px;opacity:.7;margin-bottom:8px">version <b id="pp-ver-tag">${PP_VERSION}</b></div>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="pp-set-island"> Dynamic Island</label>
-    <label style="display:flex;align-items:center;gap:8px;margin-bottom:12px"><input type="checkbox" id="pp-set-dark"> Dark mode</label>
+    <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="pp-set-dark"> Dark mode</label>
+    <div style="font-size:12px;opacity:.7;margin:4px 0 6px">Wallpaper</div>
+    <div id="pp-wp-swatches" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
     <input id="pp-open-btn" class="menu_button" type="button" value="เปิดมือถือ">
     <input id="pp-diag-btn" class="menu_button" type="button" value="Diagnostics">
   </div>
@@ -581,6 +606,16 @@ function registerSettingsPanel() {
         darkBox.checked = cfg.theme === 'dark';
         darkBox.addEventListener('change', () => { getCfg().theme = darkBox.checked ? 'dark' : 'light'; saveCfg(); applyTheme(); });
     }
+    const wpWrap = document.getElementById('pp-wp-swatches');
+    if (wpWrap) {
+        wpWrap.innerHTML = Object.keys(WALLPAPERS).map(k =>
+            `<button class="pp-wp-swatch" data-wp="${k}" title="${k}" style="background:${WALLPAPERS[k]}"></button>`).join('');
+        const mark = () => wpWrap.querySelectorAll('.pp-wp-swatch').forEach(b =>
+            b.classList.toggle('on', b.dataset.wp === (getCfg().wallpaper || 'aurora')));
+        wpWrap.querySelectorAll('.pp-wp-swatch').forEach(b =>
+            b.addEventListener('click', () => { getCfg().wallpaper = b.dataset.wp; saveCfg(); applyWallpaper(); mark(); }));
+        mark();
+    }
     document.getElementById('pp-open-btn')?.addEventListener('click', ppOpen);
     document.getElementById('pp-diag-btn')?.addEventListener('click', () => window.PP_DIAG());
 }
@@ -592,6 +627,7 @@ window.PP_DIAG = function () {
         version: PP_VERSION, loaded: window.PP_LOADED, contextOk: !!c,
         genQuiet: !!(c && typeof c.generateQuietPrompt === 'function'),
         chars: listStCharacters().length, contacts: getContacts().length,
+        generating: ppGeneratingId, wallpaper: getCfg().wallpaper,
         theme: getCfg().theme, island: getCfg().dynamicIsland,
     };
     console.table(rows);
