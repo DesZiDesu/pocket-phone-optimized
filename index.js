@@ -1,14 +1,36 @@
-// pocket-phone/index.js — Stage 5: persistent typing state · chat UI polish · wallpaper · squircle icons
+// pocket-phone/index.js — Stage 6a: home wallpaper upload · island shows replies · edit/delete · regen · per-chat bg+bubble
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.5.0-stage5';
+const PP_VERSION = '0.6.0-stage6a';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
     try { return SillyTavern.getContext(); } catch { return null; }
 }
 
-// ── wallpapers ──
+// ── media store (localforage สำหรับรูปใหญ่ + fallback localStorage) ──
+function mediaStore() {
+    try {
+        if (window.SillyTavern && SillyTavern.libs && SillyTavern.libs.localforage) {
+            return SillyTavern.libs.localforage.createInstance({ name: 'pocket-phone', storeName: 'media' });
+        }
+    } catch {}
+    return null;
+}
+async function saveMedia(key, dataUrl) {
+    const store = mediaStore();
+    if (store) { try { await store.setItem(key, dataUrl); return true; } catch {} }
+    try { localStorage.setItem('ppmedia_' + key, dataUrl); return true; } catch {}
+    return false;
+}
+async function loadMedia(key) {
+    const store = mediaStore();
+    if (store) { try { const v = await store.getItem(key); if (v) return v; } catch {} }
+    try { return localStorage.getItem('ppmedia_' + key); } catch {}
+    return null;
+}
+
+// ── wallpapers (preset) ──
 const WALLPAPERS = {
     aurora: 'radial-gradient(38% 26% at 22% 15%, rgba(94,92,230,.55), transparent 72%), radial-gradient(40% 26% at 84% 22%, rgba(255,159,10,.4), transparent 72%), radial-gradient(46% 32% at 50% 92%, rgba(52,199,89,.34), transparent 72%), radial-gradient(40% 28% at 88% 82%, rgba(191,90,242,.34), transparent 72%), linear-gradient(160deg,#0a0a12,#050506)',
     ocean: 'radial-gradient(50% 40% at 30% 18%, rgba(10,132,255,.5), transparent 70%), radial-gradient(52% 42% at 82% 82%, rgba(48,209,88,.3), transparent 72%), linear-gradient(160deg,#04121f,#010409)',
@@ -16,6 +38,15 @@ const WALLPAPERS = {
     forest: 'radial-gradient(55% 45% at 25% 20%, rgba(52,199,89,.45), transparent 72%), radial-gradient(50% 40% at 85% 82%, rgba(10,132,255,.28), transparent 72%), linear-gradient(160deg,#08120a,#040604)',
     mono: 'radial-gradient(70% 55% at 50% 0%, #1e1e26, #050506 72%)',
 };
+// ── chat backgrounds + bubble colors ──
+const CHAT_BGS = {
+    '': '',
+    dusk: 'linear-gradient(180deg,#1a1030,#0a0616)',
+    mint: 'linear-gradient(180deg,#0a1f18,#04100c)',
+    rose: 'linear-gradient(180deg,#2a0f18,#12060a)',
+    steel: 'linear-gradient(180deg,#12161c,#06080b)',
+};
+const BUBBLE_COLORS = ['#0a84ff', '#30d158', '#ff375f', '#bf5af2', '#ff9f0a', '#5e5ce6'];
 
 // ── store ──
 const DEFAULTS = {
@@ -23,8 +54,9 @@ const DEFAULTS = {
     accent: '#0a84ff',
     dynamicIsland: true,
     wallpaper: 'aurora',
-    contacts: [],   // { id, name, avatar }
-    threads: {},    // { [id]: [ { from:'me'|'them', text, ts } ] }
+    contacts: [],       // { id, name, avatar }
+    threads: {},        // { [id]: [ { from:'me'|'them', text, ts } ] }
+    chatStyle: {},      // { [id]: { bg, bubble } }
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -56,7 +88,6 @@ function cleanReply(t) {
     s = s.replace(/\[(?:CoT|COT|THINK|SYSTEM|CONTEXT|PERSONA|PHASE|STEP)[^\]]*\][^\n]*/gi, '');
     return s.trim();
 }
-
 function getUserName() {
     const c = ctx();
     try { if (c && c.name1) return c.name1; } catch {}
@@ -114,20 +145,27 @@ function applyIsland() {
     const island = document.getElementById('pp-island');
     if (island) island.style.display = getCfg().dynamicIsland ? 'flex' : 'none';
 }
-function applyWallpaper() {
+async function applyWallpaper() {
     const el = document.getElementById('pp-home-wp');
     if (!el) return;
     const wp = getCfg().wallpaper || 'aurora';
+    if (wp === 'custom') {
+        const img = await loadMedia('home-wp');
+        if (img) { el.style.background = `#000 center/cover no-repeat`; el.style.backgroundImage = `url(${img})`; return; }
+    }
+    el.style.backgroundImage = '';
     el.style.background = WALLPAPERS[wp] || WALLPAPERS.aurora;
 }
 
 // ── router ──
 let ppActiveContact = null;
-let ppGeneratingId = null;   // id ของคอนแทกต์ที่บอทกำลังคิดคำตอบ (null = ว่าง)
+let ppGeneratingId = null;   // id ที่บอทกำลังคิดคำตอบ (null = ว่าง)
 let ppCurrentScreen = 'home';
+let ppEditMode = false;
 
 function ppNav(screen) {
     ppCurrentScreen = screen;
+    document.getElementById('pp-chat-settings')?.classList.remove('show');
     document.querySelectorAll('.pp-screen').forEach(s => s.classList.remove('show'));
     if (screen === 'home') { document.getElementById('pp-home')?.classList.add('show'); return; }
     const el = document.getElementById('pp-scr-' + screen);
@@ -173,6 +211,11 @@ function getThread(id) {
     if (!cfg.threads[id]) cfg.threads[id] = [];
     return cfg.threads[id];
 }
+function getChatStyle(id) {
+    const cfg = getCfg();
+    if (!cfg.chatStyle[id]) cfg.chatStyle[id] = { bg: '', bubble: '' };
+    return cfg.chatStyle[id];
+}
 function listStCharacters() {
     const c = ctx();
     if (c && Array.isArray(c.characters) && c.characters.length) {
@@ -205,6 +248,8 @@ const ICON = {
     back: `<svg viewBox="0 0 12 20" width="11" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2 2 10l8 8"/></svg>`,
     compose: `<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>`,
     generate: `<svg viewBox="0 0 24 24" fill="#fff"><path d="M12 2.5l1.6 4.3 4.3 1.6-4.3 1.6L12 14.3l-1.6-4.3L6.1 8.4l4.3-1.6L12 2.5z"/><path d="M18.4 13.6l.9 2.3 2.3.9-2.3.9-.9 2.3-.9-2.3-2.3-.9 2.3-.9.9-2.3z"/></svg>`,
+    menu: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>`,
+    regen: `<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M17.65 6.35A8 8 0 1 0 19.73 13h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>`,
 };
 
 const APPS = [
@@ -233,7 +278,6 @@ function buildPhone() {
     </div>
 
     <div id="pp-screens">
-      <!-- HOME -->
       <div class="pp-screen show" id="pp-home">
         <div id="pp-home-wp"></div>
         <div class="pp-home-clock pp-clock">9:41</div>
@@ -243,7 +287,6 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
-      <!-- MESSAGES -->
       <div class="pp-screen" id="pp-scr-messages">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="home">${ICON.back}</button>
@@ -255,7 +298,6 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
-      <!-- ADD CONTACT -->
       <div class="pp-screen" id="pp-scr-contacts">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
@@ -266,7 +308,6 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
-      <!-- CHAT -->
       <div class="pp-screen" id="pp-scr-chat">
         <div class="pp-chat-header" id="pp-chat-header">
           <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
@@ -274,7 +315,14 @@ function buildPhone() {
             <span id="pp-chat-hdr-av"></span>
             <span class="pp-chat-hdr-name" id="pp-chat-hdr-name">Contact</span>
           </div>
-          <span style="width:34px"></span>
+          <button class="pp-nav-action" id="pp-chat-menu-btn" title="ตัวเลือก">${ICON.menu}</button>
+        </div>
+        <div id="pp-chat-settings">
+          <div class="pp-cs-row"><span>ลบข้อความ</span><button id="pp-edit-toggle" class="pp-cs-btn">แก้ไข</button></div>
+          <div class="pp-cs-label">พื้นหลังแชท</div>
+          <div class="pp-cs-swatches" id="pp-chat-bg-swatches"></div>
+          <div class="pp-cs-label">สีข้อความของฉัน</div>
+          <div class="pp-cs-swatches" id="pp-bubble-swatches"></div>
         </div>
         <div class="pp-msgs" id="pp-msgs"></div>
         <div class="pp-inputbar">
@@ -333,8 +381,10 @@ function renderAddContacts() {
     </div>`).join('');
 }
 
-function browHTML(m, grouped, tail) {
-    return `<div class="pp-brow ${m.from === 'me' ? 'out' : 'in'}${grouped ? ' grp' : ''}" data-from="${m.from}">
+function browHTML(m, idx, grouped, tail) {
+    const out = m.from === 'me';
+    return `<div class="pp-brow ${out ? 'out' : 'in'}${grouped ? ' grp' : ''}" data-from="${m.from}">
+        <button class="pp-del" data-del="${idx}">✕</button>
         <div class="pp-bubble${tail ? ' tail' : ''}">${esc(m.text)}</div>
     </div>`;
 }
@@ -346,49 +396,88 @@ function renderThread() {
     if (name) name.textContent = c.name;
     const avSlot = document.getElementById('pp-chat-hdr-av');
     if (avSlot) avSlot.innerHTML = contactAvatarHTML(c, 30);
-    const status = document.getElementById('pp-chat-hdr-name')?.nextElementSibling; // (ไม่มี status แยก)
     const msgs = document.getElementById('pp-msgs');
     if (!msgs) return;
+    msgs.classList.toggle('edit-on', ppEditMode);
     const th = getThread(c.id);
     if (!th.length) {
         msgs.innerHTML = `<div class="pp-sys">เริ่มบทสนทนา</div>`;
     } else {
-        msgs.innerHTML = th.map((m, i) => {
+        let html = th.map((m, i) => {
             const prev = th[i - 1], next = th[i + 1];
             const grouped = prev && prev.from === m.from;
             const tail = !next || next.from !== m.from;
-            return browHTML(m, grouped, tail);
+            return browHTML(m, i, grouped, tail);
         }).join('');
+        // ปุ่มรีเจน โผล่เฉพาะใต้คำตอบล่าสุดของบอท (ไม่รก)
+        if (!ppEditMode && ppGeneratingId !== c.id && th[th.length - 1].from === 'them') {
+            html += `<div class="pp-regen-row"><button id="pp-regen-btn" class="pp-regen">${ICON.regen}รีเจน</button></div>`;
+        }
+        msgs.innerHTML = html;
     }
+    applyChatStyle();
     if (ppGeneratingId === c.id) showTyping();
     msgs.scrollTop = msgs.scrollHeight;
 }
 
 function appendBubble(m) {
-    const msgs = document.getElementById('pp-msgs');
-    if (!msgs) return;
-    msgs.querySelector('.pp-sys')?.remove();
-    const rows = [...msgs.querySelectorAll('.pp-brow')];
-    const last = rows[rows.length - 1];
-    const grouped = last && last.dataset.from === m.from;
-    if (grouped) last.querySelector('.pp-bubble')?.classList.remove('tail');
-    msgs.insertAdjacentHTML('beforeend', browHTML(m, grouped, true));
-    msgs.scrollTop = msgs.scrollHeight;
+    // ใช้ตอนส่งข้อความผู้ใช้ระหว่างที่ไม่ได้ rebuild ทั้งเธรด
+    renderThread();
 }
 
 function showTyping() {
     const msgs = document.getElementById('pp-msgs');
     if (!msgs || document.getElementById('pp-typing')) return;
+    document.getElementById('pp-regen-row')?.remove();
     msgs.insertAdjacentHTML('beforeend',
         `<div class="pp-brow in" id="pp-typing"><div class="pp-typing"><span></span><span></span><span></span></div></div>`);
     msgs.scrollTop = msgs.scrollHeight;
 }
 function hideTyping() { document.getElementById('pp-typing')?.remove(); }
 
-// ── Dynamic Island typing activity (คงอยู่จนเจนเสร็จ) ──
+// ── chat appearance ──
+function applyChatStyle() {
+    const c = ppActiveContact; if (!c) return;
+    const st = getChatStyle(c.id);
+    const msgs = document.getElementById('pp-msgs');
+    if (msgs) { msgs.style.background = st.bg ? (CHAT_BGS[st.bg] || '') : ''; }
+    const scr = document.getElementById('pp-scr-chat');
+    if (scr) scr.style.setProperty('--pp-mybub', st.bubble || getCfg().accent || '#0a84ff');
+}
+function toggleChatSettings() {
+    const p = document.getElementById('pp-chat-settings');
+    if (!p) return;
+    const show = !p.classList.contains('show');
+    p.classList.toggle('show', show);
+    if (show) buildChatSwatches();
+}
+function buildChatSwatches() {
+    const bgWrap = document.getElementById('pp-chat-bg-swatches');
+    if (bgWrap) {
+        bgWrap.innerHTML = Object.keys(CHAT_BGS).map(k =>
+            `<button class="pp-cs-swatch" data-chatbg="${k}" style="background:${k ? CHAT_BGS[k] : 'var(--pp-bg3)'}">${k ? '' : 'ปกติ'}</button>`).join('');
+    }
+    const bubWrap = document.getElementById('pp-bubble-swatches');
+    if (bubWrap) {
+        bubWrap.innerHTML = BUBBLE_COLORS.map(col =>
+            `<button class="pp-cs-swatch" data-bubble="${col}" style="background:${col}"></button>`).join('');
+    }
+    const et = document.getElementById('pp-edit-toggle');
+    if (et) et.classList.toggle('on', ppEditMode);
+    markChatSwatches();
+}
+function markChatSwatches() {
+    const c = ppActiveContact; if (!c) return;
+    const st = getChatStyle(c.id);
+    document.querySelectorAll('#pp-chat-bg-swatches .pp-cs-swatch').forEach(b => b.classList.toggle('on', b.dataset.chatbg === st.bg));
+    document.querySelectorAll('#pp-bubble-swatches .pp-cs-swatch').forEach(b => b.classList.toggle('on', b.dataset.bubble === st.bubble));
+}
+
+// ── Dynamic Island ──
 function islandTyping(c) {
     const island = document.getElementById('pp-island');
     if (!island || !getCfg().dynamicIsland) return;
+    clearTimeout(island._t);
     island.dataset.cid = c.id;
     island.innerHTML = `${islandAvatarHTML(c)}<div class="pp-island-body">
         <div class="pp-island-name">${esc(c.name)}</div>
@@ -396,9 +485,27 @@ function islandTyping(c) {
     void island.offsetWidth;
     requestAnimationFrame(() => island.classList.add('pp-island-live'));
 }
+function islandShowReplies(c, lines) {
+    const island = document.getElementById('pp-island');
+    if (!island || !getCfg().dynamicIsland) { collapseIsland(); return; }
+    let i = 0;
+    const step = () => {
+        if (i >= lines.length) { collapseIsland(); return; }
+        island.dataset.cid = c.id;
+        island.innerHTML = `${islandAvatarHTML(c)}<div class="pp-island-body">
+            <div class="pp-island-name">${esc(c.name)}</div>
+            <div class="pp-island-msg">${esc(lines[i])}</div></div>`;
+        void island.offsetWidth;
+        island.classList.add('pp-island-live');
+        i++;
+        island._t = setTimeout(step, 2300);
+    };
+    step();
+}
 function collapseIsland() {
     const island = document.getElementById('pp-island');
     if (!island) return;
+    clearTimeout(island._t);
     island.classList.remove('pp-island-live');
     setTimeout(() => {
         if (!island.classList.contains('pp-island-live')) {
@@ -412,6 +519,7 @@ function ppOpenThread(id) {
     const c = getContacts().find(x => x.id === id);
     if (!c) return;
     ppActiveContact = c;
+    ppEditMode = false;
     ppNav('chat');
 }
 function ppAddContact(id) {
@@ -425,6 +533,15 @@ function ppAddContact(id) {
         renderAddContacts();
     }
 }
+function ppDeleteMsg(idx) {
+    const c = ppActiveContact; if (!c) return;
+    const th = getThread(c.id);
+    if (idx < 0 || idx >= th.length) return;
+    th.splice(idx, 1);
+    saveCfg();
+    renderThread();
+    renderContactList();
+}
 
 // ── input actions ──
 function ppSendUserMessage() {
@@ -435,16 +552,23 @@ function ppSendUserMessage() {
     if (!text) return false;
     input.value = '';
     input.style.height = 'auto';
-    const th = getThread(c.id);
-    const msg = { from: 'me', text, ts: Date.now() };
-    th.push(msg);
+    getThread(c.id).push({ from: 'me', text, ts: Date.now() });
     saveCfg();
-    appendBubble(msg);
+    renderThread();
     return true;
 }
-
 function ppViewing(c) {
     return ppCurrentScreen === 'chat' && ppActiveContact && ppActiveContact.id === c.id;
+}
+
+async function ppRegenerate() {
+    const c = ppActiveContact;
+    if (!c || ppGeneratingId) return;
+    const th = getThread(c.id);
+    while (th.length && th[th.length - 1].from === 'them') th.pop();
+    saveCfg();
+    renderThread();
+    ppGenerateReply();
 }
 
 async function ppGenerateReply() {
@@ -459,10 +583,11 @@ async function ppGenerateReply() {
     ppGeneratingId = c.id;
     const genBtn = document.getElementById('pp-gen');
     if (genBtn) genBtn.disabled = true;
-    if (ppViewing(c)) showTyping();
+    if (ppViewing(c)) { document.getElementById('pp-regen-row')?.remove(); showTyping(); }
     islandTyping(c);
     renderContactList();
 
+    let produced = [];
     try {
         const context = ctx();
         const userName = getUserName();
@@ -501,6 +626,7 @@ async function ppGenerateReply() {
         for (let i = 0; i < lines.length; i++) {
             await new Promise(r => setTimeout(r, i === 0 ? 300 : 500 + Math.random() * 400));
             threadArr.push({ from: 'them', text: lines[i], ts: Date.now() });
+            produced.push(lines[i]);
             saveCfg();
             if (ppViewing(c)) renderThread(); // rebuild + typing (ยังเจนอยู่)
         }
@@ -511,9 +637,9 @@ async function ppGenerateReply() {
     } finally {
         ppGeneratingId = null;
         hideTyping();
-        collapseIsland();
         if (genBtn) genBtn.disabled = false;
-        if (ppViewing(c)) renderThread(); else renderContactList();
+        if (ppViewing(c)) { renderThread(); collapseIsland(); }
+        else { renderContactList(); if (produced.length) islandShowReplies(c, produced); else collapseIsland(); }
     }
 }
 
@@ -531,7 +657,20 @@ function injectPhone() {
 
     document.getElementById('pp-frame')?.addEventListener('click', e => {
         const island = e.target.closest('#pp-island');
-        if (island && island.dataset.cid) { ppOpenThread(island.dataset.cid); return; }
+        if (island && island.dataset.cid) { clearTimeout(island._t); collapseIsland(); ppOpenThread(island.dataset.cid); return; }
+        if (e.target.closest('#pp-chat-menu-btn')) { toggleChatSettings(); return; }
+        if (e.target.closest('#pp-edit-toggle')) {
+            ppEditMode = !ppEditMode;
+            document.getElementById('pp-edit-toggle')?.classList.toggle('on', ppEditMode);
+            renderThread(); return;
+        }
+        const cbg = e.target.closest('[data-chatbg]');
+        if (cbg && ppActiveContact) { getChatStyle(ppActiveContact.id).bg = cbg.dataset.chatbg; saveCfg(); applyChatStyle(); markChatSwatches(); return; }
+        const bub = e.target.closest('[data-bubble]');
+        if (bub && ppActiveContact) { getChatStyle(ppActiveContact.id).bubble = bub.dataset.bubble; saveCfg(); applyChatStyle(); markChatSwatches(); return; }
+        const del = e.target.closest('[data-del]');
+        if (del) { e.stopPropagation(); ppDeleteMsg(+del.dataset.del); return; }
+        if (e.target.closest('#pp-regen-btn')) { ppRegenerate(); return; }
         const nav = e.target.closest('[data-nav]');
         if (nav) { ppNav(nav.dataset.nav); return; }
         const add = e.target.closest('[data-add]');
@@ -552,7 +691,7 @@ function injectPhone() {
         input.addEventListener('keydown', e => {
             if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
                 e.preventDefault();
-                ppSendUserMessage(); // Enter = ส่งข้อความของผู้ใช้ (บอทยังไม่ตอบ)
+                ppSendUserMessage(); // Enter = ส่งข้อความผู้ใช้ (บอทยังไม่ตอบ)
             }
         });
     }
@@ -589,7 +728,9 @@ function registerSettingsPanel() {
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px"><input type="checkbox" id="pp-set-island"> Dynamic Island</label>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><input type="checkbox" id="pp-set-dark"> Dark mode</label>
     <div style="font-size:12px;opacity:.7;margin:4px 0 6px">Wallpaper</div>
-    <div id="pp-wp-swatches" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"></div>
+    <div id="pp-wp-swatches" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px"></div>
+    <label id="pp-home-wp-label" class="menu_button" style="display:inline-block;margin-bottom:12px;cursor:pointer">อัปโหลดรูปจากเครื่อง<input type="file" id="pp-home-wp-file" accept="image/*" style="display:none"></label>
+    <br>
     <input id="pp-open-btn" class="menu_button" type="button" value="เปิดมือถือ">
     <input id="pp-diag-btn" class="menu_button" type="button" value="Diagnostics">
   </div>
@@ -607,15 +748,26 @@ function registerSettingsPanel() {
         darkBox.addEventListener('change', () => { getCfg().theme = darkBox.checked ? 'dark' : 'light'; saveCfg(); applyTheme(); });
     }
     const wpWrap = document.getElementById('pp-wp-swatches');
+    const markWp = () => wpWrap && wpWrap.querySelectorAll('.pp-wp-swatch').forEach(b =>
+        b.classList.toggle('on', b.dataset.wp === (getCfg().wallpaper || 'aurora')));
     if (wpWrap) {
         wpWrap.innerHTML = Object.keys(WALLPAPERS).map(k =>
             `<button class="pp-wp-swatch" data-wp="${k}" title="${k}" style="background:${WALLPAPERS[k]}"></button>`).join('');
-        const mark = () => wpWrap.querySelectorAll('.pp-wp-swatch').forEach(b =>
-            b.classList.toggle('on', b.dataset.wp === (getCfg().wallpaper || 'aurora')));
         wpWrap.querySelectorAll('.pp-wp-swatch').forEach(b =>
-            b.addEventListener('click', () => { getCfg().wallpaper = b.dataset.wp; saveCfg(); applyWallpaper(); mark(); }));
-        mark();
+            b.addEventListener('click', () => { getCfg().wallpaper = b.dataset.wp; saveCfg(); applyWallpaper(); markWp(); }));
+        markWp();
     }
+    document.getElementById('pp-home-wp-file')?.addEventListener('change', async e => {
+        const f = e.target.files[0]; if (!f) return;
+        const r = new FileReader();
+        r.onload = async () => {
+            await saveMedia('home-wp', r.result);
+            getCfg().wallpaper = 'custom'; saveCfg(); applyWallpaper(); markWp();
+            ppToast('ตั้งรูปหน้าจอแล้ว');
+        };
+        r.readAsDataURL(f);
+        e.target.value = '';
+    });
     document.getElementById('pp-open-btn')?.addEventListener('click', ppOpen);
     document.getElementById('pp-diag-btn')?.addEventListener('click', () => window.PP_DIAG());
 }
@@ -626,6 +778,7 @@ window.PP_DIAG = function () {
     const rows = {
         version: PP_VERSION, loaded: window.PP_LOADED, contextOk: !!c,
         genQuiet: !!(c && typeof c.generateQuietPrompt === 'function'),
+        localforage: !!mediaStore(),
         chars: listStCharacters().length, contacts: getContacts().length,
         generating: ppGeneratingId, wallpaper: getCfg().wallpaper,
         theme: getCfg().theme, island: getCfg().dynamicIsland,
