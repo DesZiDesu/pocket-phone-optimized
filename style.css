@@ -1,4 +1,4 @@
-/* pocket-phone/style.css — Stage 6b-fix */
+/* pocket-phone/style.css — Stage 6b-fix2 */
 
 #pp-fab { cursor: pointer; font-size: 20px; padding: 4px 6px; border-radius: 8px;
     background: transparent; border: none; color: inherit; }
@@ -238,41 +238,71 @@
 .pp-switch input:checked + span::before { transform: translateX(19px); }
 input[type=range] { accent-color: var(--pp-accent); }
 
-/* CALL screen */
+/* ── CALL screen (iOS style) ── */
 #pp-scr-call { background: #000; }
 .pp-call-bg { position: absolute; inset: 0; background-size: cover; background-position: center;
-    filter: blur(48px) brightness(.45); transform: scale(1.35); z-index: 0; }
-.pp-call-bg::after { content: ''; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(0,0,0,.35), rgba(0,0,0,.55)); }
-.pp-call-top { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 0 6px; }
-#pp-call-av .pp-avatar { width: 96px; height: 96px; box-shadow: 0 8px 30px rgba(0,0,0,.5); }
-.pp-call-name { font-size: 27px; font-weight: 600; color: #fff; text-shadow: 0 2px 12px rgba(0,0,0,.5); }
-.pp-call-status { font-size: 14px; color: rgba(235,235,245,.75); transition: opacity .4s; }
+    filter: blur(26px) brightness(.68) saturate(1.1); transform: scale(1.22); z-index: 0; }
+.pp-call-bg.no-img { background: radial-gradient(120% 90% at 50% 0%, #2a2a33, #08080b 70%); filter: none; transform: none; }
+.pp-call-bg::after { content: ''; position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,.28), rgba(0,0,0,.12) 45%, rgba(0,0,0,.55)); }
+.pp-call-top { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 46px 0 6px; }
+.pp-call-sub { font-size: 14px; color: rgba(235,235,245,.7); letter-spacing: .2px; }
+.pp-call-name { font-size: 32px; font-weight: 600; color: #fff; text-shadow: 0 2px 14px rgba(0,0,0,.5); }
+.pp-call-status { font-size: 15px; color: rgba(235,235,245,.72); transition: opacity .4s; }
 .pp-call-dur { font-size: 17px; color: rgba(235,235,245,.9); font-variant-numeric: tabular-nums; }
+#pp-call-av { margin-top: 14px; }
+#pp-call-av .pp-avatar { width: 108px; height: 108px; box-shadow: 0 10px 40px rgba(0,0,0,.55);
+    border: 2px solid rgba(255,255,255,.18); }
 /* ตัวหนังสือลอย ค่อย ๆ จาง */
 .pp-call-stage { position: relative; z-index: 1; flex: 1; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; padding: 24px 28px; gap: 16px; overflow: hidden; text-align: center; }
-.pp-call-float { font-size: 23px; line-height: 1.5; color: #fff; text-shadow: 0 2px 18px rgba(0,0,0,.75);
+    align-items: center; justify-content: center; padding: 20px 30px; gap: 16px; overflow: hidden; text-align: center; }
+.pp-call-float { font-size: 24px; line-height: 1.5; color: #fff; text-shadow: 0 2px 18px rgba(0,0,0,.8);
     opacity: 0; transform: translateY(14px); transition: opacity .6s ease, transform .6s ease; max-width: 100%; font-weight: 500; }
-.pp-call-float.me { font-size: 17px; color: rgba(235,235,245,.68); font-weight: 400; }
+.pp-call-float.me { font-size: 17px; color: rgba(235,235,245,.62); font-weight: 400; }
 .pp-call-float.show { opacity: 1; transform: none; }
 .pp-call-float.fade { opacity: 0; transform: translateY(-12px); }
 .pp-call-typing { position: relative; z-index: 1; display: none; gap: 5px; align-self: center;
-    margin: 0 auto 6px; padding: 10px 16px; background: rgba(255,255,255,.14); border-radius: 16px; width: fit-content; }
+    margin: 0 auto 8px; padding: 10px 16px; background: rgba(255,255,255,.14); border-radius: 16px; width: fit-content;
+    backdrop-filter: blur(10px); }
 .pp-call-typing.show { display: flex; }
-.pp-call-typing span { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.8);
+.pp-call-typing span { width: 8px; height: 8px; border-radius: 50%; background: rgba(255,255,255,.85);
     animation: pp-bounce .9s infinite ease-in-out; }
 .pp-call-typing span:nth-child(2) { animation-delay: .15s; }
 .pp-call-typing span:nth-child(3) { animation-delay: .3s; }
-.pp-call-inputbar { position: relative; z-index: 1; display: flex; align-items: flex-end; gap: 8px; padding: 6px 12px; }
-.pp-call-input { flex: 1; background: rgba(255,255,255,.14); border: none; border-radius: 20px; padding: 9px 15px;
-    color: #fff; font-size: 16px; resize: none; line-height: 1.4; max-height: 80px; font-family: inherit; }
+.pp-call-inputbar { position: relative; z-index: 1; display: flex; align-items: flex-end; gap: 8px; padding: 6px 16px; }
+.pp-call-input { flex: 1; background: rgba(255,255,255,.14); border: none; border-radius: 20px; padding: 10px 16px;
+    color: #fff; font-size: 16px; resize: none; line-height: 1.4; max-height: 80px; font-family: inherit;
+    backdrop-filter: blur(12px); }
 .pp-call-input:focus { outline: none; }
 .pp-call-input::placeholder { color: rgba(235,235,245,.5); }
-.pp-call-ctrls { position: relative; z-index: 1; display: flex; justify-content: center; padding: 10px 0 28px; }
+/* ปุ่มควบคุมสาย */
+.pp-call-ctrls { position: relative; z-index: 1; padding: 12px 0 34px; }
+.pp-call-active-ctrls { display: flex; align-items: center; justify-content: center; gap: 34px; }
+.pp-cc { background: none; border: none; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    color: #fff; font-size: 11px; }
+.pp-cc .pp-cc-ic { width: 62px; height: 62px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,.16); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); transition: background .15s; }
+.pp-cc.on .pp-cc-ic { background: #fff; color: #000; }
+.pp-cc-lb { color: rgba(235,235,245,.85); }
 .pp-call-end { width: 62px; height: 62px; border-radius: 50%; background: #ff453a; border: none; color: #fff;
     cursor: pointer; display: flex; align-items: center; justify-content: center; box-shadow: 0 6px 22px rgba(255,69,58,.5);
     transition: transform .12s; }
 .pp-call-end:active { transform: scale(.9); }
+/* สายเรียกเข้า */
+.pp-call-answer { display: none; align-items: flex-end; justify-content: space-around; padding: 0 20px; }
+.pp-ans-btn { background: none; border: none; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 8px;
+    color: #fff; font-size: 12px; }
+.pp-ans-btn svg { width: 30px; height: 30px; padding: 18px; border-radius: 50%; box-sizing: content-box; }
+.pp-ans-btn.decline svg { background: #ff453a; box-shadow: 0 6px 22px rgba(255,69,58,.5); }
+.pp-ans-btn.accept svg { background: #30d158; box-shadow: 0 6px 22px rgba(48,209,88,.5); }
+.pp-ans-btn:active svg { transform: scale(.92); }
+/* toggle ringing */
+#pp-scr-call.ringing .pp-call-active-ctrls { display: none; }
+#pp-scr-call.ringing .pp-call-answer { display: flex; }
+#pp-scr-call.ringing .pp-call-inputbar,
+#pp-scr-call.ringing .pp-call-stage,
+#pp-scr-call.ringing .pp-call-typing { display: none; }
+#pp-scr-call.ringing .pp-call-top { flex: 1; justify-content: center; }
 
 /* call log + transcript */
 .pp-calllog-row { display: flex; align-items: center; gap: 14px; padding: 12px 16px; cursor: pointer; border-bottom: .5px solid var(--pp-sep); }
