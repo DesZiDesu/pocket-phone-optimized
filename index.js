@@ -1,7 +1,7 @@
-// pocket-phone/index.js — Stage 6b: text color · full Call system (type+generate · timer · movie-style · call log)
+// pocket-phone/index.js — Stage 6b-fix: call bg = bot avatar (more blur) · floating fading speech · timer replaces status · chat time dividers
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.7.0-stage6b';
+const PP_VERSION = '0.7.1-stage6b';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
@@ -105,6 +105,19 @@ function ppDateLabel() {
     const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
     const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     return `${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()}`;
+}
+// ── ป้ายเวลากลางแชท (แบบ Messages) ──
+function chatDivider(prevTs, ts) {
+    if (!prevTs || !ts) return '';
+    const gap = ts - prevTs;
+    if (gap < 3600000) return ''; // ห่างน้อยกว่า 1 ชม. → ไม่ขึ้น
+    const d = new Date(ts), p = new Date(prevTs);
+    const hm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+    const sameDay = d.toDateString() === p.toDateString();
+    if (sameDay && gap < 6 * 3600000) return hm; // วันเดียวกัน ห่างพอควร → เวลาอย่างเดียว
+    const days = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
+    const months = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+    return `${days[d.getDay()]} ${d.getDate()} ${months[d.getMonth()]} · ${hm}`; // ห่างนาน/คนละวัน → มีวันที่
 }
 let ppClockTimer = null;
 function startClock() {
@@ -257,7 +270,6 @@ const ICON = {
     upload: `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M5 20h14v-2H5v2zM12 4l-5 5h3v6h4V9h3l-5-5z"/></svg>`,
     phone: `<svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></svg>`,
     hangup: `<svg viewBox="0 0 24 24" width="24" height="24" fill="#fff"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" transform="rotate(135 12 12)"/></svg>`,
-    calllog: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M13 3h-2v10h2V3zm4.83 2.17l-1.42 1.42A6.98 6.98 0 0 1 19 12a7 7 0 1 1-11.58-5.41L6 5.17A9 9 0 1 0 21 12c0-2.74-1.23-5.18-3.17-6.83z"/></svg>`,
 };
 
 const APPS = [
@@ -383,9 +395,9 @@ function buildPhone() {
           <div id="pp-call-av"></div>
           <div class="pp-call-name" id="pp-call-name"></div>
           <div class="pp-call-status" id="pp-call-status">กำลังโทร…</div>
-          <div class="pp-call-dur" id="pp-call-dur">0:00</div>
+          <div class="pp-call-dur" id="pp-call-dur" style="display:none">0:00</div>
         </div>
-        <div class="pp-call-transcript" id="pp-call-transcript"></div>
+        <div class="pp-call-stage" id="pp-call-stage"></div>
         <div class="pp-call-typing" id="pp-call-typing"><span></span><span></span><span></span></div>
         <div class="pp-call-inputbar">
           <textarea class="pp-call-input" id="pp-call-input" rows="1" placeholder="พูดว่า…"></textarea>
@@ -414,7 +426,7 @@ function buildPhone() {
           <span class="pp-nav-title" id="pp-transcript-title">บันทึกสาย</span>
           <span style="width:34px"></span>
         </div>
-        <div class="pp-call-transcript" id="pp-transcript-body" style="filter:none"></div>
+        <div class="pp-transcript-body" id="pp-transcript-body"></div>
         <div class="pp-home-bar"></div>
       </div>
     </div>
@@ -438,7 +450,7 @@ function renderContactList(filter) {
         const th = getThread(c.id);
         const last = th[th.length - 1];
         const typing = ppGeneratingId === c.id;
-        const preview = typing ? 'กำลังพิมพ์…' : (last ? (last.type === 'call' ? last.text : last.text) : 'แตะเพื่อเริ่มแชท');
+        const preview = typing ? 'กำลังพิมพ์…' : (last ? last.text : 'แตะเพื่อเริ่มแชท');
         return `<div class="pp-row" data-cid="${esc(c.id)}">
             ${contactAvatarHTML(c, 52)}
             <div class="pp-row-meta">
@@ -490,13 +502,18 @@ function renderThread() {
     if (!th.length) {
         msgs.innerHTML = `<div class="pp-sys">เริ่มบทสนทนา</div>`;
     } else {
-        let html = th.map((m, i) => {
-            if (m.type === 'call') return browHTML(m, i, false, true);
+        let html = '';
+        let prevTs = null;
+        th.forEach((m, i) => {
+            const div = chatDivider(prevTs, m.ts || 0);
+            if (div) html += `<div class="pp-time-divider">${esc(div)}</div>`;
+            prevTs = m.ts || prevTs;
+            if (m.type === 'call') { html += browHTML(m, i, false, true); return; }
             const prev = th[i - 1], next = th[i + 1];
-            const grouped = prev && prev.from === m.from && prev.type !== 'call';
+            const grouped = prev && prev.from === m.from && prev.type !== 'call' && !div;
             const tail = !next || next.from !== m.from || next.type === 'call';
-            return browHTML(m, i, grouped, tail);
-        }).join('');
+            html += browHTML(m, i, grouped, tail);
+        });
         if (!ppEditMode && ppGeneratingId !== c.id && th[th.length - 1].from === 'them' && th[th.length - 1].type !== 'call') {
             html += `<div class="pp-regen-row" id="pp-regen-row"><button id="pp-regen-btn" class="pp-regen">${ICON.regen}รีเจน</button></div>`;
         }
@@ -796,17 +813,22 @@ function ppStartCall() {
     if (!c || ppCall) return;
     ppCall = { contact: c, startTime: null, interval: null, transcript: [], generating: false };
     const nm = document.getElementById('pp-call-name'); if (nm) nm.textContent = c.name;
-    const st = document.getElementById('pp-call-status'); if (st) st.textContent = 'กำลังโทร…';
-    const dur = document.getElementById('pp-call-dur'); if (dur) dur.textContent = '0:00';
+    const st = document.getElementById('pp-call-status'); if (st) { st.style.display = ''; st.textContent = 'กำลังโทร…'; }
+    const dur = document.getElementById('pp-call-dur'); if (dur) { dur.style.display = 'none'; dur.textContent = '0:00'; }
     const av = document.getElementById('pp-call-av'); if (av) av.innerHTML = contactAvatarHTML(c, 96);
+    // พื้นหลัง = รูปบอทที่กำลังคุยด้วย (เบลอหนัก)
     const bg = document.getElementById('pp-call-bg'); if (bg) bg.style.backgroundImage = c.avatar ? `url(${c.avatar})` : '';
-    const box = document.getElementById('pp-call-transcript'); if (box) box.innerHTML = '';
+    const stage = document.getElementById('pp-call-stage'); if (stage) stage.innerHTML = '';
     const ty = document.getElementById('pp-call-typing'); if (ty) ty.classList.remove('show');
     ppNav('call');
     setTimeout(() => {
         if (!ppCall) return;
         ppCall.startTime = Date.now();
-        const s2 = document.getElementById('pp-call-status'); if (s2) s2.textContent = `${c.name} รับสายแล้ว`;
+        // รับสาย → โชว์เลขเวลา แล้วให้คำว่า "รับสายแล้ว" เลือนออก
+        const s2 = document.getElementById('pp-call-status');
+        const d2 = document.getElementById('pp-call-dur');
+        if (d2) d2.style.display = '';
+        if (s2) { s2.textContent = `${c.name} รับสายแล้ว`; setTimeout(() => { if (ppCall) { s2.style.opacity = '0'; setTimeout(() => { if (ppCall) s2.style.display = 'none'; }, 400); } }, 1000); }
         ppCall.interval = setInterval(() => {
             if (!ppCall || !ppCall.startTime) return;
             const secs = Math.floor((Date.now() - ppCall.startTime) / 1000);
@@ -816,16 +838,23 @@ function ppStartCall() {
     }, 1600);
 }
 
-function ppCallAppend(who, text) {
+// ตัวหนังสือลอย ค่อย ๆ จาง ตามความยาว
+function ppCallFloat(text, who) {
     if (!ppCall) return;
     ppCall.transcript.push({ who, text });
-    const box = document.getElementById('pp-call-transcript');
-    if (!box) return;
-    const div = document.createElement('div');
-    div.className = 'pp-call-line ' + (who === 'me' ? 'me' : 'them');
-    div.textContent = text;
-    box.appendChild(div);
-    box.scrollTop = box.scrollHeight;
+    const stage = document.getElementById('pp-call-stage');
+    if (!stage) return;
+    const el = document.createElement('div');
+    el.className = 'pp-call-float ' + (who === 'me' ? 'me' : 'them');
+    el.textContent = text;
+    stage.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    const dur = Math.min(Math.max(text.length * 95 + 1800, 2600), 12000);
+    setTimeout(() => {
+        el.classList.remove('show');
+        el.classList.add('fade');
+        setTimeout(() => el.remove(), 700);
+    }, dur);
 }
 
 function ppCallSend() {
@@ -834,7 +863,7 @@ function ppCallSend() {
     const t = (inp.value || '').trim();
     if (!t) return false;
     inp.value = ''; inp.style.height = 'auto';
-    ppCallAppend('me', t);
+    ppCallFloat(t, 'me');
     return true;
 }
 
@@ -855,14 +884,16 @@ async function ppCallGenerate() {
             `[สายโทรศัพท์ — ${c.name} กำลังคุยสายอยู่กับ ${userName}]`,
             persona ? `ข้อมูลตัวละคร ${c.name}: ${persona}` : null,
             recent ? `บทสนทนาในสายล่าสุด:\n${recent}` : 'สานต่อบทสนทนาตามธรรมชาติ',
-            `\nตอบในบทบาท ${c.name} ที่กำลังคุยโทรศัพท์ ตอบให้มีชีวิตชีวาเหมือนฉากในหนัง — ใส่น้ำเสียง สีหน้า หรือการกระทำสั้น ๆ ในวงเล็บได้ (เช่น (หัวเราะเบา ๆ)) 1-2 ประโยค.`,
-            `ใช้ภาษาเดียวกับที่คุย. ห้ามใส่ชื่อขึ้นต้น. ห้ามใส่ think/แท็กใด ๆ.`,
+            `\nตอบในบทบาท ${c.name} ที่กำลังคุยโทรศัพท์ — เป็น "คำพูดในสาย" ล้วน ๆ 1-3 ประโยค.`,
+            `ห้ามใส่การกระทำ/คำบรรยายในวงเล็บ. ห้ามใส่ * . ห้ามใส่ชื่อขึ้นต้น. ห้ามใส่ think/แท็กใด ๆ. ใช้ภาษาเดียวกับที่คุย.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 3);
         const nameRx = new RegExp('^' + c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
         raw = raw.replace(nameRx, '').trim();
-        const text = raw.split(/\n+/).map(l => l.trim()).filter(Boolean).slice(0, 3).join(' ') || '…';
-        if (ppCall) ppCallAppend('them', text);
+        let text = raw.split(/\n+/).map(l => l.trim()).filter(Boolean).slice(0, 3).join(' ');
+        // ตัดการกระทำในวงเล็บ + ดอกจัน ทิ้ง
+        text = text.replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\*[^*]*\*/g, '').replace(/\s+/g, ' ').trim() || '…';
+        if (ppCall) ppCallFloat(text, 'them');
     } catch (e) {
         ppToast('สายไม่ชัด ลองอีกครั้ง');
         console.error('[pocket-phone] call gen', e);
@@ -891,6 +922,8 @@ function ppEndCall() {
     ppCall = null;
     ppActiveContact = c;
     ppToast(`วางสาย · ${durText}`);
+    // เผื่อ status ถูกซ่อนไว้ คืนค่ากันไว้รอบหน้า
+    const s = document.getElementById('pp-call-status'); if (s) { s.style.display = ''; s.style.opacity = '1'; }
     ppNav('chat');
 }
 
@@ -920,7 +953,7 @@ function ppShowTranscript(i) {
     if (title) title.textContent = `${l.name} · ${l.durText}`;
     const body = document.getElementById('pp-transcript-body');
     if (body) body.innerHTML = (l.transcript || []).length
-        ? l.transcript.map(x => `<div class="pp-call-line ${x.who === 'me' ? 'me' : 'them'}">${esc(x.text)}</div>`).join('')
+        ? l.transcript.map(x => `<div class="pp-tr-line ${x.who === 'me' ? 'me' : 'them'}">${esc(x.text)}</div>`).join('')
         : `<div class="pp-sys">ไม่มีบทสนทนาในสายนี้</div>`;
     ppNav('transcript');
 }
