@@ -1,7 +1,8 @@
-// pocket-phone/index.js — 0.9.2 — ท่อน 1/3 (ต้นไฟล์ → จบ buildPhone)
-// เปลี่ยนจาก 0.9.1: รวมจักรวาลแบบ A (จับชื่อคอนแทกต์ที่บอทเอ่ยถึง) อยู่ในท่อน 2/3
+// pocket-phone/index.js — 0.9.3 — ท่อน 1/3 (ต้นไฟล์ → จบ buildPhone)
+// เปลี่ยนจาก 0.9.2: หน้ารายชื่อ 3 หมวด · โน้ตอ่านตอนเจน · มีผลต่อ RP ดึง context.chat
+// getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.9.2';
+const PP_VERSION = '0.9.3';
 const MODULE_NAME = 'pocket-phone';
 
 function ctx() {
@@ -55,7 +56,7 @@ const DEFAULTS = {
     userAvatarMode: 'auto',
     sharedUniverse: false,
     universeAffectsRP: false,
-    contacts: [],
+    contacts: [],       // { id, name, avatar, customName?, npc? }
     threads: {},
     chatStyle: {},
     callLog: [],
@@ -136,6 +137,28 @@ function noteCategory(cid) {
     if (isPinned(cid)) return 'pin';
     if (cid === currentCharacterId()) return 'main';
     return 'npc';
+}
+// ── หมวดในหน้ารายชื่อแชท: ปักหมุด / ตัวละคร(จาก ST) / NPC ──
+function contactCategory(c) {
+    if (isPinned(c.id)) return 'pin';
+    if (c.npc) return 'npc';
+    return 'char';
+}
+
+// ── ดึงประวัติบทโรลเพลย์หลัก (สำหรับ toggle มีผลต่อ RP) ──
+function mainChatRecap(maxLines) {
+    const c = ctx();
+    try {
+        if (c && Array.isArray(c.chat) && c.chat.length) {
+            const lines = c.chat.slice(-(maxLines || 8)).map(m => {
+                const who = m.is_user ? getUserName() : (m.name || 'Char');
+                const txt = String(m.mes || '').replace(/<[^>]+>/g, '').replace(/\n+/g, ' ').trim();
+                return txt ? `${who}: ${txt.slice(0, 220)}` : '';
+            }).filter(Boolean);
+            return lines.join('\n');
+        }
+    } catch {}
+    return '';
 }
 
 let ppUserAvatarCache = null;
@@ -519,6 +542,7 @@ function buildPhone() {
             <input id="pp-rename-input" placeholder="ชื่อ" style="flex:1;background:var(--pp-bg3);border:none;border-radius:14px;padding:9px 14px;color:var(--pp-txt);font-size:14px;min-width:120px">
             <button id="pp-rename-save" class="pp-cs-btn">บันทึก</button>
           </div>
+          <div class="pp-cs-row"><span>ทำเป็น NPC (หมวด NPC)</span><button id="pp-npc-toggle" class="pp-cs-btn">สลับ</button></div>
           <div class="pp-cs-row"><span>ลบข้อความ</span><button id="pp-edit-toggle" class="pp-cs-btn">แก้ไข</button></div>
           <div class="pp-cs-row"><span>ประวัติการโทร (คนนี้)</span><button id="pp-calllog-btn" class="pp-cs-btn">เปิด</button></div>
           <div class="pp-cs-label">พื้นหลังแชท</div>
@@ -658,7 +682,7 @@ function buildPhone() {
 </dialog>`;
 }
 
-// pocket-phone/index.js — 0.9.2 — ท่อน 2/3 (renderNotesRow → ppGenerateReply)
+// pocket-phone/index.js — 0.9.3 — ท่อน 2/3 (renderNotesRow → ppGenerateReply)
 // ต่อจากท่อน 1/3 ที่จบตรง buildPhone()
 
 // ── notes row (IG-style, 3 หมวด: ปักหมุด/หลัก/NPC) ──
@@ -698,22 +722,14 @@ function renderNotesRow() {
     row.innerHTML = html + parts.join('');
 }
 
-// ── renders ──
+// ── renders: หน้ารายชื่อแยก 3 หมวด (ปักหมุด/ตัวละคร/NPC) ──
 function renderContactList(filter) {
     const list = document.getElementById('pp-contact-list');
     if (!list) return;
     let contacts = getContacts().slice();
     if (filter) contacts = contacts.filter(c => dname(c).toLowerCase().includes(filter.toLowerCase()));
-    contacts.sort((a, b) => {
-        const pa = isPinned(a.id) ? 1 : 0, pb = isPinned(b.id) ? 1 : 0;
-        if (pa !== pb) return pb - pa;
-        return lastTs(b.id) - lastTs(a.id);
-    });
-    if (!contacts.length) {
-        list.innerHTML = `<div class="pp-empty">ยังไม่มีคนคุย<br><span>แตะปุ่มมุมขวาบนเพื่อเพิ่ม</span></div>`;
-        return;
-    }
-    list.innerHTML = contacts.map(c => {
+
+    const rowHTML = (c) => {
         const th = getThread(c.id);
         const last = th[th.length - 1];
         const typing = ppGeneratingId === c.id;
@@ -737,7 +753,27 @@ function renderContactList(filter) {
             </div>
             ${editControls}
         </div>`;
-    }).join('');
+    };
+
+    if (!contacts.length) {
+        list.innerHTML = `<div class="pp-empty">ยังไม่มีคนคุย<br><span>แตะปุ่มมุมขวาบนเพื่อเพิ่ม</span></div>`;
+        return;
+    }
+
+    // แบ่ง 3 หมวด แล้วเรียงในแต่ละหมวดตามเวลาล่าสุด
+    const groups = { pin: [], char: [], npc: [] };
+    contacts.forEach(c => groups[contactCategory(c)].push(c));
+    for (const k of Object.keys(groups)) groups[k].sort((a, b) => lastTs(b.id) - lastTs(a.id));
+
+    let html = '';
+    const section = (arr, label) => {
+        if (!arr.length) return;
+        html += `<div class="pp-list-head">${label}</div>` + arr.map(rowHTML).join('');
+    };
+    section(groups.pin, 'ปักหมุด');
+    section(groups.char, 'ตัวละคร');
+    section(groups.npc, 'NPC');
+    list.innerHTML = html;
 }
 
 function renderAddContacts() {
@@ -861,6 +897,8 @@ function buildChatSwatches() {
     }
     const et = document.getElementById('pp-edit-toggle');
     if (et) et.classList.toggle('on', ppEditMode);
+    const nt = document.getElementById('pp-npc-toggle');
+    if (nt && ppActiveContact) nt.classList.toggle('on', !!ppActiveContact.npc);
     if (ppActiveContact) {
         const st = getChatStyle(ppActiveContact.id);
         const bc = document.getElementById('pp-bubble-color'); if (bc) bc.value = st.bubble || getCfg().accent || '#0a84ff';
@@ -971,6 +1009,14 @@ function ppTogglePin(id) {
     renderContactList();
     ppToast(i >= 0 ? 'เลิกปักหมุด' : 'ปักหมุดแล้ว');
 }
+function ppToggleNpc(id) {
+    const c = getContacts().find(x => x.id === id);
+    if (!c) return;
+    c.npc = !c.npc;
+    if (ppActiveContact && ppActiveContact.id === id) ppActiveContact.npc = c.npc;
+    saveCfg();
+    ppToast(c.npc ? 'ย้ายไปหมวด NPC' : 'ย้ายไปหมวดตัวละคร');
+}
 function ppDeleteChat(id) {
     const cfg = getCfg();
     cfg.contacts = cfg.contacts.filter(x => x.id !== id);
@@ -1039,7 +1085,6 @@ async function ppRegenerate() {
 // ── รวมจักรวาลแบบ A: บอทเอ่ยชื่อคอนแทกต์อื่น → คนนั้นถึงมีสิทธิ์ทักตามมา ──
 function findMentionedContact(text, excludeId) {
     const s = String(text || '');
-    // เรียงตามความยาวชื่อ (ยาวก่อน) กันชื่อสั้นซ้อนชื่อยาว
     const cands = getContacts()
         .filter(c => c.id !== excludeId)
         .map(c => ({ c, names: [c.name, c.customName].filter(Boolean) }))
@@ -1051,8 +1096,7 @@ function findMentionedContact(text, excludeId) {
     }
     return null;
 }
-async function universeInterject(interloper, aboutName) {
-    // บอทที่ถูกเอ่ยถึง ทักเข้ามาในแชทของตัวเอง — ป้อนแค่ persona ตัวเอง (ไม่รู้จักคนอื่น)
+async function universeInterject(interloper) {
     try {
         const userName = getUserName();
         const persona = getContactPersona(interloper.id);
@@ -1106,6 +1150,7 @@ async function ppGenerateReply() {
         const userName = getUserName();
         const persona = getContactPersona(c.id);
         const un = getUserNote();
+        const rp = getCfg().universeAffectsRP ? mainChatRecap(8) : '';
         const th = getThread(c.id).slice(-16);
         const histTxt = th.map(m => {
             if (m.type === 'call') return `[${m.text}]`;
@@ -1115,12 +1160,13 @@ async function ppGenerateReply() {
         const prompt = [
             `[Text messaging app — you are ${dname(c)}, chatting with ${userName}.]`,
             persona ? `Character info for ${dname(c)}: ${persona}` : null,
-            un ? `IMPORTANT: ${userName} just posted a status note that says: "${un.text}". You can see it. React to it naturally if it fits.` : null,
+            rp ? `Ongoing roleplay context (what is happening between you and ${userName} in the main story — remember it, stay consistent):\n${rp}` : null,
+            `Status note from ${userName} right now: ${un ? `"${un.text}"` : '-'}. If there is a note, you can see it and may react naturally.`,
             histTxt ? `\n<history>\n${histTxt}\n</history>` : null,
             `\nReply in character as ${dname(c)} with short, natural text messages (1-3 short lines).`,
             `Reply in the SAME language the conversation is using (Thai if they use Thai).`,
             getCfg().botCallKeyword ? `If ${dname(c)} would rather call than text right now, include a phrase like "โทรหา"/"เดี๋ยวโทร"/"calling you" — the app turns it into a call.` : null,
-            `You may set your own status note by adding a final line "[NOTE] your short status" (optional, only if it fits).`,
+            `You may set your own status note by adding a final line exactly like: [NOTE] your short status — do this when your mood/situation would make you post one.`,
             `STRICT: no emoji at all. No asterisk actions. No name prefix. No think/tags (except the optional [NOTE] line). Plain text only.`,
         ].filter(Boolean).join('\n');
 
@@ -1151,7 +1197,6 @@ async function ppGenerateReply() {
                 saveCfg();
                 if (ppViewing(c)) renderThread();
             }
-            // รวมจักรวาลแบบ A: ถ้าบอทเอ่ยชื่อคอนแทกต์อื่น คนนั้นถึงมีสิทธิ์ทักตามมา
             if (getCfg().sharedUniverse) mentioned = findMentionedContact(lines.join(' '), c.id);
         }
     } catch (e) {
@@ -1172,13 +1217,12 @@ async function ppGenerateReply() {
         } else {
             if (ppViewing(c)) { renderThread(); islandCollapse(); }
             else { renderContactList(); if (produced.length) islandShowReplies(c, produced); else islandCollapse(); }
-            // มีเหตุผลรองรับ: คนที่ถูกเอ่ยถึงถึงทักตามมา (หน่วงสักครู่)
-            if (mentioned) setTimeout(() => universeInterject(mentioned, dname(c)), 1600);
+            if (mentioned) setTimeout(() => universeInterject(mentioned), 1600);
         }
     }
 }
 
-// pocket-phone/index.js — 0.9.2 — ท่อน 3/3 (ระบบโทร → settings → boot → CSS)
+// pocket-phone/index.js — 0.9.3 — ท่อน 3/3 (ระบบโทร → settings → boot → CSS)
 // ต่อจากท่อน 2/3 ที่จบตรง ppGenerateReply
 
 // ── phone Settings render ──
@@ -1229,6 +1273,7 @@ function ppRenderCallScreen(c, status, ringing) {
     const st = document.getElementById('pp-call-status'); if (st) st.textContent = status;
     const dur = document.getElementById('pp-call-dur'); if (dur) dur.style.display = 'none';
     const av = document.getElementById('pp-call-av'); if (av) av.innerHTML = contactAvatarHTML(c, 116);
+    // ★ พื้นหลัง = รูปบอทเบลอ (แก้กลับจาก 0.9.2 ที่หาย)
     const bg = document.getElementById('pp-call-bg');
     if (bg) { bg.style.backgroundImage = c.avatar ? `url(${c.avatar})` : ''; bg.style.background = c.avatar ? '' : 'radial-gradient(circle at 50% 30%,#2a2a3a,#0a0a12)'; }
     const stage = document.getElementById('pp-call-stage'); if (stage) stage.innerHTML = '';
@@ -1283,13 +1328,23 @@ async function ppCallGenerate(opener) {
     try {
         const userName = getUserName();
         const persona = getContactPersona(c.id);
+        // ★ บอทอ่านประวัติแชทได้ (แก้ความจำเสื่อม) + โน้ต + RP recap
+        const chatHist = getThread(c.id).slice(-12).map(m => {
+            if (m.type === 'call') return `[${m.text}]`;
+            return `${m.from === 'me' ? userName : dname(c)}: ${m.text}`;
+        }).join('\n');
+        const un = getUserNote();
+        const rp = getCfg().universeAffectsRP ? mainChatRecap(6) : '';
         const tr = (ppCall.transcript || []).slice(-10)
             .map(m => `${m.from === 'me' ? userName : dname(c)}: ${m.text}`).join('\n');
         const prompt = [
             `[Phone call — you are ${dname(c)}, on a voice call with ${userName}${opener ? ' that you just started' : ''}.]`,
             persona ? `Character info for ${dname(c)}: ${persona}` : null,
-            tr ? `\nCall so far:\n${tr}` : null,
-            opener ? `\nYou called ${userName}. Open the call — say why you're calling, in your own voice.` : `\nContinue the call naturally.`,
+            rp ? `Ongoing roleplay context (stay consistent):\n${rp}` : null,
+            chatHist ? `Your recent text chat with ${userName} (you remember this):\n${chatHist}` : null,
+            un ? `${userName}'s current status note: "${un.text}"` : null,
+            tr ? `\nThis call so far:\n${tr}` : null,
+            opener ? `\nYou called ${userName}. Open the call — say why you're calling, in your own voice, referencing what you two were just talking about if relevant.` : `\nContinue the call naturally.`,
             `\nSpeak as ${dname(c)} out loud. Break your speech into SHORT separate lines (one thought or sentence per line), the way people actually talk on the phone — not one long block.`,
             `Reply in the SAME language ${userName} uses (Thai if Thai). No emoji. No asterisks. No stage directions. No name prefix. No tags.`,
             `If you want to end the call, say a natural goodbye (บาย / ไว้คุยกันใหม่ / แล้วเจอกัน).`,
@@ -1401,7 +1456,7 @@ function injectPhone() {
     dlg?.addEventListener('cancel', e => { e.preventDefault(); ppClose(); });
 
     document.getElementById('pp-frame')?.addEventListener('click', e => {
-        const t = e.target.closest('[data-nav],[data-cid],[data-add],[data-del],[data-pin],[data-delchat],[data-chatbg],[data-wp],[data-usernote],[data-botnote],[data-showtr],[data-dellog],#pp-close-btn,#pp-chat-menu-btn,#pp-chat-call-btn,#pp-edit-toggle,#pp-calllog-btn,#pp-rename-save,#pp-bubble-clear,#pp-list-edit-btn,#pp-gen,#pp-regen-btn,#pp-call-gen,#pp-call-end,#pp-call-accept,#pp-call-decline,#pp-callend-ok,#pp-calllog-back,#pp-calllog-edit-btn,#pp-help-botcall,#pp-help-universe,#pp-help-affectrp,#pp-island,.pp-cc');
+        const t = e.target.closest('[data-nav],[data-cid],[data-add],[data-del],[data-pin],[data-delchat],[data-chatbg],[data-wp],[data-usernote],[data-botnote],[data-showtr],[data-dellog],#pp-close-btn,#pp-chat-menu-btn,#pp-chat-call-btn,#pp-edit-toggle,#pp-npc-toggle,#pp-calllog-btn,#pp-rename-save,#pp-bubble-clear,#pp-list-edit-btn,#pp-gen,#pp-regen-btn,#pp-call-gen,#pp-call-end,#pp-call-accept,#pp-call-decline,#pp-callend-ok,#pp-calllog-back,#pp-calllog-edit-btn,#pp-help-botcall,#pp-help-universe,#pp-help-affectrp,#pp-island,.pp-cc');
         if (!t) return;
 
         if (t.id === 'pp-close-btn') return ppClose();
@@ -1429,6 +1484,7 @@ function injectPhone() {
 
         if (t.id === 'pp-chat-call-btn') return ppStartCall();
         if (t.id === 'pp-chat-menu-btn') return toggleChatSettings();
+        if (t.id === 'pp-npc-toggle' && ppActiveContact) { ppToggleNpc(ppActiveContact.id); const b = document.getElementById('pp-npc-toggle'); if (b) b.classList.toggle('on', !!ppActiveContact.npc); return; }
         if (t.id === 'pp-edit-toggle') { ppEditMode = !ppEditMode; renderThread(); const b = document.getElementById('pp-edit-toggle'); if (b) b.classList.toggle('on', ppEditMode); return; }
         if (t.id === 'pp-list-edit-btn') { ppListEditMode = !ppListEditMode; renderContactList(); const b = document.getElementById('pp-list-edit-btn'); if (b) b.textContent = ppListEditMode ? 'เสร็จ' : 'แก้ไข'; return; }
         if (t.id === 'pp-rename-save' && ppActiveContact) {
@@ -1451,8 +1507,8 @@ function injectPhone() {
         if (t.id === 'pp-island' && t.dataset.cid) { const c = getContacts().find(x => x.id === t.dataset.cid); if (c) { ppActiveContact = c; ppNav('chat'); } return; }
         if (t.classList && t.classList.contains('pp-cc')) { t.classList.toggle('on'); return; }
         if (t.id === 'pp-help-botcall') return ppHelpPopup('บอทโทรหา', 'เมื่อเปิด: ถ้าบอทตอบแล้วมีคำแนวจะโทร (โทรหา / เดี๋ยวโทร / calling you) แอปจะเปลี่ยนเป็นสายเรียกเข้าให้อัตโนมัติ<br><br>ใช้คีย์เวิร์ดจับ ไม่มี generation เพิ่ม ไม่กินโทเคน<br><br>ปิด = บอทไม่โทรเข้าเอง คุณยังกดโทรออกหาบอทได้ปกติ');
-        if (t.id === 'pp-help-universe') return ppHelpPopup('บอท/NPC ทักข้ามแชท', 'เมื่อเปิด: ถ้าบอทที่คุยด้วย "เอ่ยชื่อ" คอนแทกต์อีกคนในคำตอบ คนนั้นจะทักเข้ามาเองตามมา — มีเหตุผลรองรับในบทสนทนา ไม่ใช่โผล่มาลอย ๆ ตัวละครไม่รู้จักกัน (ป้อนแค่บุคลิกของคนที่ทัก)<br><br>ต้นทุน: ตอนมีคนทักเข้ามา = +1 generation (~input 300–700 โทเคน)<br><br>ปิด = แต่ละแชทแยกกันเหมือนเดิม');
-        if (t.id === 'pp-help-affectrp') return ppHelpPopup('มีผลต่อโรลเพลย์หลัก', 'เมื่อเปิด: สรุปสั้น ๆ ของสิ่งที่เกิดในมือถือจะถูกส่งเข้าบทหลักของ SillyTavern เผื่อให้ตัวละครหลักรับรู้<br><br>ต้นทุน: เพิ่ม context ทุกข้อความในบทหลัก (~+100–300 โทเคน/ข้อความ ตราบใดที่ยังมีเหตุการณ์ค้าง)<br><br>ปิด = ทุกอย่างในมือถืออยู่แค่ในมือถือ ไม่กระทบบทหลัก');
+        if (t.id === 'pp-help-universe') return ppHelpPopup('บอท/NPC ทักข้ามแชท', 'เมื่อเปิด: ถ้าบอทที่คุยด้วย "เอ่ยชื่อ" คอนแทกต์อีกคนในคำตอบ คนนั้นจะทักเข้ามาเองตามมา — มีเหตุผลรองรับ ไม่โผล่ลอย ๆ ตัวละครไม่รู้จักกัน (ป้อนแค่บุคลิกคนที่ทัก)<br><br>ต้นทุน: ตอนมีคนทักเข้ามา = +1 generation (~input 300–700 โทเคน)<br><br>ปิด = แต่ละแชทแยกกัน');
+        if (t.id === 'pp-help-affectrp') return ppHelpPopup('มีผลต่อโรลเพลย์หลัก', 'เมื่อเปิด: ดึงบทสนทนาโรลเพลย์หลัก 6-8 บรรทัดล่าสุดเข้า prompt เพื่อให้บอทในมือถือจำได้ว่าเกิดอะไรในบทหลัก + เวลาในแชทอิงเวลาจริง<br><br>ต้นทุน: +context ทุกข้อความ (~+100–300 โทเคน)<br><br>ปิด: ทุกอย่างอยู่แค่ในมือถือ อิงเวลาจริง');
     });
 
     const chatInput = document.getElementById('pp-input');
@@ -1496,7 +1552,7 @@ function injectPhone() {
     document.getElementById('pp-text-color')?.addEventListener('input', e => { if (ppActiveContact) { getChatStyle(ppActiveContact.id).textColor = e.target.value; saveCfg(); applyChatStyle(); } });
 }
 
-// ── FAB + external island + settings panel + boot ──
+// ── FAB + wand menu button + external island + settings panel + boot ──
 function injectFab() {
     if (document.getElementById('pp-fab')) return;
     const fab = document.createElement('button');
@@ -1508,6 +1564,22 @@ function injectFab() {
     fab.querySelector('svg')?.setAttribute('height', '24');
     fab.addEventListener('click', ppOpen);
     document.body.appendChild(fab);
+}
+// ★ ปุ่มใน wand menu (extensions menu) — เอากลับตามที่ขอ
+function injectWandButton() {
+    if (document.getElementById('pp-wand-btn')) return false;
+    const menu = document.getElementById('extensionsMenu');
+    if (!menu) return false;
+    const item = document.createElement('div');
+    item.id = 'pp-wand-btn';
+    item.className = 'list-group-item flex-container flexGap5 interactable';
+    item.tabIndex = 0;
+    item.innerHTML = `<div style="width:20px;display:flex;justify-content:center">${ICON.messages}</div><span>Pocket Phone</span>`;
+    item.querySelector('svg')?.setAttribute('width', '18');
+    item.querySelector('svg')?.setAttribute('height', '18');
+    item.addEventListener('click', () => { ppOpen(); });
+    menu.appendChild(item);
+    return true;
 }
 function injectExternalIsland() {
     if (document.getElementById('pp-ext-island')) return;
@@ -1532,7 +1604,7 @@ function registerSettingsPanel() {
   </div>
   <div class="inline-drawer-content">
     <div style="font-size:12px;opacity:.7;margin-bottom:8px">version <b>${PP_VERSION}</b></div>
-    <div style="font-size:12px;opacity:.7;margin-bottom:8px">แตะปุ่มลอยมุมขวาล่างเพื่อเปิดมือถือ</div>
+    <div style="font-size:12px;opacity:.7;margin-bottom:8px">เปิดจากปุ่มลอยมุมขวาล่าง หรือเมนู wand (Extensions)</div>
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><input type="checkbox" id="pp-ext-island-toggle"> Dynamic Island นอกมือถือ (แม้ปิดมือถือ)</label>
     <input id="pp-ext-open" class="menu_button" type="button" value="เปิดมือถือ">
     <input id="pp-ext-diag" class="menu_button" type="button" value="Diagnostics">
@@ -1551,10 +1623,13 @@ window.PP_DIAG = function () {
         loaded: window.PP_LOADED,
         contextOk: !!ctx(),
         genQuiet: !!(ctx() && typeof ctx().generateQuietPrompt === 'function'),
+        chatLen: (ctx() && Array.isArray(ctx().chat)) ? ctx().chat.length : 0,
         contacts: getContacts().length,
         userNote: !!getUserNote(),
         sharedUniverse: getCfg().sharedUniverse,
+        affectsRP: getCfg().universeAffectsRP,
         botCallKeyword: getCfg().botCallKeyword,
+        wandBtn: !!document.getElementById('pp-wand-btn'),
     };
     console.table(rows);
     ppToast('Diag → console');
@@ -1566,6 +1641,7 @@ function injectCSS() {
     const s = document.createElement('style');
     s.id = 'pp-css';
     s.textContent = `
+.pp-list-head{padding:12px 16px 4px;font-size:13px;font-weight:700;color:var(--pp-txt3);text-transform:uppercase;letter-spacing:.5px;}
 .pp-notes-row{display:flex;gap:14px;padding:10px 16px 12px 16px;overflow-x:auto;scrollbar-width:none;border-bottom:.5px solid var(--pp-sep);}
 .pp-notes-row::-webkit-scrollbar{display:none;}
 .pp-note-item{flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px;cursor:pointer;width:64px;}
@@ -1589,6 +1665,7 @@ window.PP_LOADED = 'parsed';
 (function boot() {
     injectCSS();
     let tries = 0;
+    let wandDone = false;
     const timer = setInterval(() => {
         tries++;
         const host = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
@@ -1613,4 +1690,15 @@ window.PP_LOADED = 'parsed';
             console.warn('[pocket-phone] no mount point after 30s');
         }
     }, 500);
+    // ★ ปุ่ม wand menu — poll แยก เพราะเมนูสร้าง/รื้อใหม่ได้ + MutationObserver คอยเติมกลับ
+    const wandTimer = setInterval(() => {
+        if (injectWandButton()) { wandDone = true; clearInterval(wandTimer); }
+    }, 700);
+    setTimeout(() => clearInterval(wandTimer), 45000);
+    try {
+        const mo = new MutationObserver(() => {
+            if (!document.getElementById('pp-wand-btn')) injectWandButton();
+        });
+        mo.observe(document.body, { childList: true, subtree: true });
+    } catch {}
 })();
