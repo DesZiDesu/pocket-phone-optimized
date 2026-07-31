@@ -1,7 +1,7 @@
-// pocket-phone/index.js — Stage 6b-fix2: bot incoming call · iOS call UI · avatar call bg · always-on chat time header
+// pocket-phone/index.js — Stage 7a: sort+time+pin · rename · ban emoji · per-chat call log · call-end screen · island fixes · Story removed
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.7.2-stage6b';
+const PP_VERSION = '0.8.0-stage7a';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
@@ -54,10 +54,11 @@ const DEFAULTS = {
     islandScope: 'phone',
     wallpaper: 'aurora',
     homeBlur: 6,
-    contacts: [],
+    contacts: [],       // { id, name, avatar, customName? }
     threads: {},
     chatStyle: {},
-    callLog: [],
+    callLog: [],         // { cid, name, avatar, startISO, duration, durText, transcript, incoming }
+    pinned: [],          // [id...]
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -82,6 +83,7 @@ function saveCfg() {
 const esc = s => String(s == null ? '' : s)
     .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
 
+// กรอง CoT/junk
 function cleanReply(t) {
     let s = String(t || '');
     s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
@@ -89,11 +91,24 @@ function cleanReply(t) {
     s = s.replace(/\[(?:CoT|COT|THINK|SYSTEM|CONTEXT|PERSONA|PHASE|STEP)[^\]]*\][^\n]*/gi, '');
     return s.trim();
 }
+// ★ กรองอิโมจิทิ้งทั้งหมด (บอทห้ามใช้)
+function stripEmoji(t) {
+    return String(t || '')
+        .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')
+        .replace(/[\u{2600}-\u{27BF}]/gu, '')
+        .replace(/[\u{2B00}-\u{2BFF}]/gu, '')
+        .replace(/[\u{1F1E6}-\u{1F1FF}]/gu, '')
+        .replace(/[\u{2190}-\u{21FF}]/gu, '')
+        .replace(/[\uFE0F\u200D\u20E3]/gu, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+}
 function getUserName() {
     const c = ctx();
     try { if (c && c.name1) return c.name1; } catch {}
     return 'User';
 }
+function dname(c) { return (c && (c.customName || c.name)) || '?'; }
 
 // ── เวลาจริง ──
 function ppNow() {
@@ -106,22 +121,31 @@ function ppDateLabel() {
     const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
     return `${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()}`;
 }
-// ── ป้ายเวลาแชท (แบบ Messages) ──
 const TH_DAYS = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
 const TH_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 function fmtHM(d) { return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; }
-// หัวแชท (ข้อความแรก) — โชว์เสมอ
+// เวลาในหน้ารายชื่อ
+function fmtListTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts), today = new Date();
+    if (d.toDateString() === today.toDateString()) return fmtHM(d);
+    const yst = new Date(); yst.setDate(yst.getDate() - 1);
+    if (d.toDateString() === yst.toDateString()) return 'เมื่อวาน';
+    if ((today - d) < 7 * 86400000) return TH_DAYS[d.getDay()];
+    return `${d.getDate()}/${d.getMonth() + 1}`;
+}
+// หัวแชท (โชว์เสมอ)
 function chatDividerFull(ts) {
     if (!ts) return '';
     const d = new Date(ts), today = new Date();
     if (d.toDateString() === today.toDateString()) return `วันนี้ ${fmtHM(d)}`;
     return `${TH_DAYS[d.getDay()]} ${d.getDate()} ${TH_MONTHS[d.getMonth()]} · ${fmtHM(d)}`;
 }
-// ระหว่างข้อความ — โชว์เมื่อห่างเกิน 1 ชม.
+// ระหว่างข้อความ — ห่างเกิน 5 นาที
 function chatDivider(prevTs, ts) {
     if (!prevTs || !ts) return '';
     const gap = ts - prevTs;
-    if (gap < 3600000) return '';
+    if (gap < 300000) return ''; // < 5 นาที
     const d = new Date(ts), p = new Date(prevTs);
     if (d.toDateString() === p.toDateString()) return fmtHM(d);
     const today = new Date();
@@ -188,7 +212,8 @@ async function applyWallpaper() {
 let ppActiveContact = null;
 let ppGeneratingId = null;
 let ppCurrentScreen = 'home';
-let ppEditMode = false;
+let ppEditMode = false;        // edit ในหน้าแชท (ลบข้อความ)
+let ppListEditMode = false;    // edit ในหน้ารายชื่อ (ปักหมุด/ลบแชท)
 
 function ppNav(screen) {
     ppCurrentScreen = screen;
@@ -224,9 +249,9 @@ function contactAvatarHTML(c, size) {
     const s = size || 52;
     if (c.avatar) {
         return `<img class="pp-avatar" style="width:${s}px;height:${s}px"
-            src="${esc(c.avatar)}" onerror="this.replaceWith(document.createRange().createContextualFragment('<span class=\\'pp-avatar pp-avatar-fb\\' style=\\'width:${s}px;height:${s}px\\'>${esc((c.name||'?')[0])}</span>'))">`;
+            src="${esc(c.avatar)}" onerror="this.replaceWith(document.createRange().createContextualFragment('<span class=\\'pp-avatar pp-avatar-fb\\' style=\\'width:${s}px;height:${s}px\\'>${esc(dname(c)[0])}</span>'))">`;
     }
-    return `<span class="pp-avatar pp-avatar-fb" style="width:${s}px;height:${s}px">${esc((c.name || '?')[0])}</span>`;
+    return `<span class="pp-avatar pp-avatar-fb" style="width:${s}px;height:${s}px">${esc(dname(c)[0])}</span>`;
 }
 
 // ── data ──
@@ -236,12 +261,18 @@ function getThread(id) {
     if (!cfg.threads[id]) cfg.threads[id] = [];
     return cfg.threads[id];
 }
+function lastTs(id) {
+    const th = getThread(id);
+    const last = th[th.length - 1];
+    return last ? (last.ts || 0) : 0;
+}
 function getChatStyle(id) {
     const cfg = getCfg();
     if (!cfg.chatStyle[id]) cfg.chatStyle[id] = { bg: '', bubble: '', bubbleImg: false, textColor: '' };
     if (cfg.chatStyle[id].textColor === undefined) cfg.chatStyle[id].textColor = '';
     return cfg.chatStyle[id];
 }
+function isPinned(id) { return (getCfg().pinned || []).includes(id); }
 function listStCharacters() {
     const c = ctx();
     if (c && Array.isArray(c.characters) && c.characters.length) {
@@ -261,9 +292,8 @@ function getContactPersona(id) {
     return ch ? (ch.persona || '') : '';
 }
 
-// ── SVG glyphs ──
+// ── SVG glyphs (ไม่มีอิโมจิ) ──
 const ICON = {
-    story: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6.2C10.5 5 8.4 4.5 6 4.5c-.8 0-1.5.6-1.5 1.4v11c0 .8.7 1.4 1.5 1.4 2.1 0 4 .5 5.3 1.5.4.3 1 .3 1.4 0 1.3-1 3.2-1.5 5.3-1.5.8 0 1.5-.6 1.5-1.4v-11c0-.8-.7-1.4-1.5-1.4-2.4 0-4.5.5-6 1.7zM12 6.2v12"/></svg>`,
     messages: `<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 3C6.9 3 3 6.6 3 11c0 2.3 1.1 4.4 2.9 5.8-.2 1.3-.8 2.5-1.6 3.4-.2.2 0 .6.3.5 1.9-.3 3.4-1 4.4-1.6 1 .3 2 .4 3 .4 5.1 0 9-3.6 9-8s-3.9-8-9-8z"/></svg>`,
     feed: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>`,
     wallet: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="6" width="18" height="12" rx="2.5"/><path d="M3 10h18" stroke-width="2"/><circle cx="17" cy="14.5" r="1.1" fill="currentColor" stroke="none"/></svg>`,
@@ -281,10 +311,11 @@ const ICON = {
     hangup: `<svg viewBox="0 0 24 24" width="26" height="26" fill="#fff"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z" transform="rotate(135 12 12)"/></svg>`,
     mic: `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/></svg>`,
     speaker: `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>`,
+    pin: `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M16 4v6l2 3v2h-5v6l-1 1-1-1v-6H6v-2l2-3V4h8zm-6 0h4v6.3l1.3 2H8.7L10 10.3V4z"/></svg>`,
+    trash: `<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 7h12l-1 13H7L6 7zm3-3h6l1 2H8l1-2z"/></svg>`,
 };
 
 const APPS = [
-    { nav: 'story', label: 'Story', glow: '#b0acff', icon: ICON.story },
     { nav: 'messages', label: 'Messages', glow: '#5ce07f', icon: ICON.messages },
     { nav: 'feed', label: 'Feed', glow: '#e8e8ed', icon: ICON.feed },
     { nav: 'wallet', label: 'Wallet', glow: '#ffc061', icon: ICON.wallet },
@@ -322,7 +353,10 @@ function buildPhone() {
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="home">${ICON.back}</button>
           <span class="pp-nav-title">Messages</span>
-          <button class="pp-nav-action" data-nav="contacts">${ICON.compose}</button>
+          <div class="pp-chat-tools">
+            <button class="pp-nav-action" id="pp-list-edit-btn" style="width:auto;font-size:15px;font-weight:600" title="แก้ไข">แก้ไข</button>
+            <button class="pp-nav-action" data-nav="contacts">${ICON.compose}</button>
+          </div>
         </div>
         <div class="pp-search-wrap"><input class="pp-search" id="pp-msg-search" placeholder="ค้นหา"></div>
         <div class="pp-list" id="pp-contact-list"></div>
@@ -352,8 +386,13 @@ function buildPhone() {
           </div>
         </div>
         <div id="pp-chat-settings">
+          <div class="pp-cs-label">ชื่อที่แสดง (แค่ในมือถือ)</div>
+          <div class="pp-cs-color-row" style="margin-bottom:6px">
+            <input id="pp-rename-input" placeholder="ชื่อ" style="flex:1;background:var(--pp-bg3);border:none;border-radius:14px;padding:9px 14px;color:var(--pp-txt);font-size:14px;min-width:120px">
+            <button id="pp-rename-save" class="pp-cs-btn">บันทึก</button>
+          </div>
           <div class="pp-cs-row"><span>ลบข้อความ</span><button id="pp-edit-toggle" class="pp-cs-btn">แก้ไข</button></div>
-          <div class="pp-cs-row"><span>ประวัติการโทร</span><button id="pp-calllog-btn" class="pp-cs-btn">เปิด</button></div>
+          <div class="pp-cs-row"><span>ประวัติการโทร (คนนี้)</span><button id="pp-calllog-btn" class="pp-cs-btn">เปิด</button></div>
           <div class="pp-cs-label">พื้นหลังแชท</div>
           <div class="pp-cs-swatches" id="pp-chat-bg-swatches"></div>
           <label class="pp-cs-upload">${ICON.upload} อัปโหลดรูปพื้นหลัง<input type="file" id="pp-chatbg-file" accept="image/*" hidden></label>
@@ -375,7 +414,6 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
-      <!-- SETTINGS APP -->
       <div class="pp-screen" id="pp-scr-settings">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="home">${ICON.back}</button>
@@ -386,6 +424,7 @@ function buildPhone() {
           <div class="pp-set-group">
             <div class="pp-set-row"><span>Dark Mode</span><label class="pp-switch"><input type="checkbox" id="pp-set-dark"><span></span></label></div>
             <div class="pp-set-row"><span>Dynamic Island</span><label class="pp-switch"><input type="checkbox" id="pp-set-island"><span></span></label></div>
+            <div class="pp-set-row"><span>Island นอกมือถือ (แม้ปิด)</span><label class="pp-switch"><input type="checkbox" id="pp-set-scope2"><span></span></label></div>
           </div>
           <div class="pp-set-label">สีหลัก (Accent)</div>
           <div class="pp-set-group"><div class="pp-set-row"><span>เลือกสี</span><label class="pp-color-wrap"><input type="color" id="pp-set-accent" value="#0a84ff"><span></span></label></div></div>
@@ -428,18 +467,33 @@ function buildPhone() {
         </div>
       </div>
 
-      <!-- CALL LOG -->
+      <!-- CALL ENDED -->
+      <div class="pp-screen" id="pp-scr-callend">
+        <div class="pp-call-bg" id="pp-callend-bg"></div>
+        <div class="pp-call-top" style="flex:1;justify-content:center">
+          <div id="pp-callend-av"></div>
+          <div class="pp-call-name" id="pp-callend-name" style="margin-top:16px"></div>
+          <div class="pp-call-status" id="pp-callend-sub">สายสิ้นสุด</div>
+          <div class="pp-call-dur" id="pp-callend-dur"></div>
+        </div>
+        <div class="pp-call-ctrls" style="z-index:1;position:relative">
+          <div style="display:flex;justify-content:center">
+            <button id="pp-callend-ok" style="background:var(--pp-accent);border:none;color:#fff;border-radius:22px;padding:12px 40px;font-size:16px;font-weight:600;cursor:pointer">เสร็จสิ้น</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- CALL LOG (แยกต่อแชท) -->
       <div class="pp-screen" id="pp-scr-calllog">
         <div class="pp-nav">
-          <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
-          <span class="pp-nav-title">ประวัติการโทร</span>
+          <button class="pp-nav-back" id="pp-calllog-back">${ICON.back}</button>
+          <span class="pp-nav-title" id="pp-calllog-title">ประวัติการโทร</span>
           <span style="width:34px"></span>
         </div>
         <div class="pp-list" id="pp-calllog-list"></div>
         <div class="pp-home-bar"></div>
       </div>
 
-      <!-- TRANSCRIPT -->
       <div class="pp-screen" id="pp-scr-transcript">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="calllog">${ICON.back}</button>
@@ -460,8 +514,14 @@ function buildPhone() {
 function renderContactList(filter) {
     const list = document.getElementById('pp-contact-list');
     if (!list) return;
-    let contacts = getContacts();
-    if (filter) contacts = contacts.filter(c => (c.name || '').toLowerCase().includes(filter.toLowerCase()));
+    let contacts = getContacts().slice();
+    if (filter) contacts = contacts.filter(c => dname(c).toLowerCase().includes(filter.toLowerCase()));
+    // เรียง: หมุดก่อน แล้วตามเวลาล่าสุด
+    contacts.sort((a, b) => {
+        const pa = isPinned(a.id) ? 1 : 0, pb = isPinned(b.id) ? 1 : 0;
+        if (pa !== pb) return pb - pa;
+        return lastTs(b.id) - lastTs(a.id);
+    });
     if (!contacts.length) {
         list.innerHTML = `<div class="pp-empty">ยังไม่มีคนคุย<br><span>แตะปุ่มมุมขวาบนเพื่อเพิ่ม</span></div>`;
         return;
@@ -471,12 +531,24 @@ function renderContactList(filter) {
         const last = th[th.length - 1];
         const typing = ppGeneratingId === c.id;
         const preview = typing ? 'กำลังพิมพ์…' : (last ? last.text : 'แตะเพื่อเริ่มแชท');
-        return `<div class="pp-row" data-cid="${esc(c.id)}">
+        const timeLbl = last ? fmtListTime(last.ts) : '';
+        const pinned = isPinned(c.id);
+        const editControls = ppListEditMode
+            ? `<div class="pp-row-edit" style="display:flex;gap:8px;flex-shrink:0">
+                 <button class="pp-cs-btn" data-pin="${esc(c.id)}" style="padding:6px 10px;background:${pinned ? 'var(--pp-accent)' : 'var(--pp-bg3)'};color:${pinned ? '#fff' : 'var(--pp-txt)'}">${ICON.pin}</button>
+                 <button class="pp-cs-btn" data-delchat="${esc(c.id)}" style="padding:6px 10px;background:rgba(255,69,58,.85);color:#fff">${ICON.trash}</button>
+               </div>`
+            : `<div style="display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0">
+                 <span style="font-size:12px;color:var(--pp-txt3)">${esc(timeLbl)}</span>
+                 ${pinned ? `<span style="color:var(--pp-txt3);opacity:.7">${ICON.pin}</span>` : ''}
+               </div>`;
+        return `<div class="pp-row" ${ppListEditMode ? '' : `data-cid="${esc(c.id)}"`}>
             ${contactAvatarHTML(c, 52)}
             <div class="pp-row-meta">
-                <div class="pp-row-name">${esc(c.name)}</div>
+                <div class="pp-row-name">${esc(dname(c))}</div>
                 <div class="pp-row-preview${typing ? ' pp-preview-typing' : ''}">${esc(preview)}</div>
             </div>
+            ${editControls}
         </div>`;
     }).join('');
 }
@@ -500,7 +572,12 @@ function renderAddContacts() {
 }
 
 function browHTML(m, idx, grouped, tail) {
-    if (m.type === 'call') return `<div class="pp-callnote" data-idx="${idx}">${ICON.phone} ${esc(m.text)}</div>`;
+    if (m.type === 'call') {
+        return `<div class="pp-callnote-wrap" style="display:flex;align-items:center;justify-content:center;gap:6px;margin:10px auto">
+            <button class="pp-del" data-del="${idx}">✕</button>
+            <div class="pp-callnote">${ICON.phone} ${esc(m.text)}</div>
+        </div>`;
+    }
     const out = m.from === 'me';
     return `<div class="pp-brow ${out ? 'out' : 'in'}${grouped ? ' grp' : ''}" data-from="${m.from}">
         <button class="pp-del" data-del="${idx}">✕</button>
@@ -512,9 +589,11 @@ function renderThread() {
     const c = ppActiveContact;
     if (!c) { ppNav('messages'); return; }
     const name = document.getElementById('pp-chat-hdr-name');
-    if (name) name.textContent = c.name;
+    if (name) name.textContent = dname(c);
     const avSlot = document.getElementById('pp-chat-hdr-av');
     if (avSlot) avSlot.innerHTML = contactAvatarHTML(c, 30);
+    const rn = document.getElementById('pp-rename-input');
+    if (rn) rn.value = c.customName || '';
     const msgs = document.getElementById('pp-msgs');
     if (!msgs) return;
     msgs.classList.toggle('edit-on', ppEditMode);
@@ -525,7 +604,6 @@ function renderThread() {
         let html = '';
         let prevTs = null;
         th.forEach((m, i) => {
-            // ป้ายเวลา: หัวแชทเสมอ + เมื่อห่างเกิน 1 ชม.
             const div = (i === 0) ? chatDividerFull(m.ts || 0) : chatDivider(prevTs, m.ts || 0);
             if (div) html += `<div class="pp-time-divider">${esc(div)}</div>`;
             prevTs = m.ts || prevTs;
@@ -600,6 +678,7 @@ function buildChatSwatches() {
         const st = getChatStyle(ppActiveContact.id);
         const bc = document.getElementById('pp-bubble-color'); if (bc) bc.value = st.bubble || getCfg().accent || '#0a84ff';
         const tc = document.getElementById('pp-text-color'); if (tc) tc.value = st.textColor || '#ffffff';
+        const rn = document.getElementById('pp-rename-input'); if (rn) rn.value = ppActiveContact.customName || '';
     }
     markChatSwatches();
 }
@@ -609,7 +688,7 @@ function markChatSwatches() {
     document.querySelectorAll('#pp-chat-bg-swatches .pp-cs-swatch').forEach(b => b.classList.toggle('on', b.dataset.chatbg === st.bg));
 }
 
-// ── Dynamic Island (ในจอ) ──
+// ── Dynamic Island ──
 let ppIslandState = null;
 let ppIslandTimer = null;
 function renderIslandInto(el, state) {
@@ -643,13 +722,13 @@ function islandRefresh() {
         renderIslandInto(external, showExt ? ppIslandState : null);
     }
 }
-function islandTyping(c) { clearTimeout(ppIslandTimer); ppIslandState = { cid: c.id, name: c.name, avatar: c.avatar, kind: 'typing' }; islandRefresh(); }
+function islandTyping(c) { clearTimeout(ppIslandTimer); ppIslandState = { cid: c.id, name: dname(c), avatar: c.avatar, kind: 'typing' }; islandRefresh(); }
 function islandShowReplies(c, lines) {
     clearTimeout(ppIslandTimer);
     let i = 0;
     const step = () => {
         if (i >= lines.length) { ppIslandState = null; islandRefresh(); return; }
-        ppIslandState = { cid: c.id, name: c.name, avatar: c.avatar, kind: 'msg', text: lines[i] };
+        ppIslandState = { cid: c.id, name: dname(c), avatar: c.avatar, kind: 'msg', text: lines[i] };
         islandRefresh(); i++;
         ppIslandTimer = setTimeout(step, 2300);
     };
@@ -683,6 +762,26 @@ function ppDeleteMsg(idx) {
     saveCfg();
     renderThread();
     renderContactList();
+}
+function ppTogglePin(id) {
+    const cfg = getCfg();
+    if (!cfg.pinned) cfg.pinned = [];
+    const i = cfg.pinned.indexOf(id);
+    if (i >= 0) cfg.pinned.splice(i, 1); else cfg.pinned.push(id);
+    saveCfg();
+    renderContactList();
+    ppToast(i >= 0 ? 'เลิกปักหมุด' : 'ปักหมุดแล้ว');
+}
+function ppDeleteChat(id) {
+    const cfg = getCfg();
+    cfg.contacts = cfg.contacts.filter(x => x.id !== id);
+    delete cfg.threads[id];
+    delete cfg.chatStyle[id];
+    cfg.pinned = (cfg.pinned || []).filter(x => x !== id);
+    cfg.callLog = (cfg.callLog || []).filter(l => l.cid !== id);
+    saveCfg();
+    renderContactList();
+    ppToast('ลบแชทแล้ว — เพิ่มใหม่ได้จากปุ่ม +');
 }
 
 // ── input actions ──
@@ -745,7 +844,7 @@ async function ppGenerateReply() {
         ppToast('พิมพ์ข้อความก่อน แล้วค่อยกดให้บอทตอบ');
         return;
     }
-    // ★ โอกาสที่บอทจะโทรเข้าแทนการพิมพ์ (เฉพาะตอนดูแชทอยู่)
+    // โอกาสที่บอทจะโทรเข้าแทนการพิมพ์
     if (ppViewing(c) && Math.random() < 0.14) { ppIncomingCall(c); return; }
 
     ppGeneratingId = c.id;
@@ -763,23 +862,25 @@ async function ppGenerateReply() {
         const th = getThread(c.id).slice(-16);
         const histTxt = th.map(m => {
             if (m.type === 'call') return `[${m.text}]`;
-            return `${m.from === 'me' ? userName : c.name}: ${m.text}`;
+            return `${m.from === 'me' ? userName : dname(c)}: ${m.text}`;
         }).join('\n');
 
+        // prompt เป็นอังกฤษ สั่งตอบไทย/ตามภาษาที่คุย + ห้ามอิโมจิ
         const prompt = [
-            `[Messages app — ${c.name} กำลังแชทกับ ${userName}]`,
-            persona ? `ข้อมูลตัวละคร ${c.name}: ${persona}` : null,
+            `[Text messaging app — you are ${dname(c)}, chatting with ${userName}.]`,
+            persona ? `Character info for ${dname(c)}: ${persona}` : null,
             histTxt ? `\n<history>\n${histTxt}\n</history>` : null,
-            `\nตอบกลับในบทบาท ${c.name} แบบข้อความแชทสั้น ๆ เป็นธรรมชาติ (1-3 บรรทัด).`,
-            `ใช้ภาษาเดียวกับที่คุยอยู่. ห้ามใส่ * บรรยายท่าทาง. ห้ามใส่ชื่อขึ้นต้น. ห้ามใส่ think/แท็กใด ๆ. ตอบเป็นข้อความล้วน.`,
+            `\nReply in character as ${dname(c)} with short, natural text messages (1-3 short lines).`,
+            `Reply in the SAME language the conversation is using (Thai if they use Thai).`,
+            `STRICT: no emoji at all. No asterisk actions. No name prefix. No think/tags. Plain text only.`,
         ].filter(Boolean).join('\n');
 
         let raw = await genWithRetry(prompt, 3);
-        const nameRx = new RegExp('^' + c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
+        const nameRx = new RegExp('^' + dname(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
         raw = raw.replace(nameRx, '').trim();
 
         const lines = raw.split(/\n+/)
-            .map(l => l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '').trim())
+            .map(l => stripEmoji(l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')).trim())
             .filter(Boolean)
             .slice(0, 3);
 
@@ -819,6 +920,7 @@ function renderPhoneSettings() {
     const cfg = getCfg();
     const d = document.getElementById('pp-set-dark'); if (d) d.checked = cfg.theme === 'dark';
     const i = document.getElementById('pp-set-island'); if (i) i.checked = cfg.dynamicIsland;
+    const sc = document.getElementById('pp-set-scope2'); if (sc) sc.checked = cfg.islandScope === 'always';
     const a = document.getElementById('pp-set-accent'); if (a) a.value = cfg.accent || '#0a84ff';
     const b = document.getElementById('pp-set-blur'); if (b) b.value = cfg.homeBlur ?? 6;
     const wpWrap = document.getElementById('pp-set-wp-swatches');
@@ -831,9 +933,10 @@ function renderPhoneSettings() {
 
 // ── CALL SYSTEM ──
 let ppCall = null; // { contact, startTime, interval, transcript, generating, connected, incoming }
+let ppCallLogSource = null; // แชทที่กำลังดูประวัติการโทรอยู่
 
 function setCallScreen(c) {
-    const nm = document.getElementById('pp-call-name'); if (nm) nm.textContent = c.name;
+    const nm = document.getElementById('pp-call-name'); if (nm) nm.textContent = dname(c);
     const av = document.getElementById('pp-call-av'); if (av) av.innerHTML = contactAvatarHTML(c, 108);
     const bg = document.getElementById('pp-call-bg');
     if (bg) { bg.style.backgroundImage = c.avatar ? `url(${c.avatar})` : ''; bg.classList.toggle('no-img', !c.avatar); }
@@ -854,10 +957,7 @@ function ppStartCall() {
     const sub = document.getElementById('pp-call-sub'); if (sub) sub.textContent = 'Pocket Phone Audio';
     const st = document.getElementById('pp-call-status'); if (st) st.textContent = 'กำลังโทร…';
     ppNav('call');
-    setTimeout(() => {
-        if (!ppCall) return;
-        ppConnectCall(false);
-    }, 1600);
+    setTimeout(() => { if (ppCall) ppConnectCall(false); }, 1600);
 }
 
 function ppIncomingCall(c) {
@@ -868,13 +968,17 @@ function ppIncomingCall(c) {
     const sub = document.getElementById('pp-call-sub'); if (sub) sub.textContent = 'สายเรียกเข้า';
     const st = document.getElementById('pp-call-status'); if (st) st.textContent = 'Pocket Phone Audio…';
     ppNav('call');
+    // แจ้งเตือนใน Island ว่ามีสายเรียกเข้า
+    ppIslandState = { cid: c.id, name: dname(c), avatar: c.avatar, kind: 'msg', text: 'สายเรียกเข้า…' };
+    islandRefresh();
 }
 
 function ppAcceptCall() {
     if (!ppCall || !ppCall.incoming) return;
     document.getElementById('pp-scr-call')?.classList.remove('ringing');
     const sub = document.getElementById('pp-call-sub'); if (sub) sub.textContent = 'Pocket Phone Audio';
-    ppConnectCall(true);
+    islandCollapse();
+    ppConnectCall(true); // ★ บอทเป็นคนโทร → พูดเปิดทันที
 }
 function ppDeclineCall() {
     if (!ppCall) return;
@@ -884,13 +988,13 @@ function ppDeclineCall() {
     ppCall = null;
     ppActiveContact = c;
     document.getElementById('pp-scr-call')?.classList.remove('ringing');
+    islandCollapse();
     ppToast('ปฏิเสธสาย');
     ppNav('chat');
 }
 
 function ppConnectCall(botOpens) {
     if (!ppCall) return;
-    const c = ppCall.contact;
     ppCall.connected = true;
     ppCall.startTime = Date.now();
     const d2 = document.getElementById('pp-call-dur'); if (d2) d2.style.display = '';
@@ -906,11 +1010,9 @@ function ppConnectCall(botOpens) {
         const d = document.getElementById('pp-call-dur');
         if (d) d.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
     }, 500);
-    // บอทเป็นคนโทรมา → เปิดบทสนทนาก่อน
     if (botOpens) setTimeout(() => { if (ppCall) ppCallGenerate(); }, 700);
 }
 
-// ตัวหนังสือลอย ค่อย ๆ จาง ตามความยาว
 function ppCallFloat(text, who) {
     if (!ppCall) return;
     ppCall.transcript.push({ who, text });
@@ -952,19 +1054,21 @@ async function ppCallGenerate() {
         const userName = getUserName();
         const persona = getContactPersona(c.id);
         const opener = ppCall.incoming && !ppCall.transcript.length;
-        const recent = ppCall.transcript.slice(-12).map(x => `${x.who === 'me' ? userName : c.name}: ${x.text}`).join('\n');
+        const recent = ppCall.transcript.slice(-12).map(x => `${x.who === 'me' ? userName : dname(c)}: ${x.text}`).join('\n');
         const prompt = [
-            `[สายโทรศัพท์ — ${c.name} ${opener ? `โทรหา ${userName}` : `กำลังคุยสายอยู่กับ ${userName}`}]`,
-            persona ? `ข้อมูลตัวละคร ${c.name}: ${persona}` : null,
-            opener ? `${c.name} เป็นคนโทรมาเอง เปิดบทสนทนาก่อน` : (recent ? `บทสนทนาในสายล่าสุด:\n${recent}` : 'สานต่อบทสนทนาตามธรรมชาติ'),
-            `\nตอบในบทบาท ${c.name} ที่กำลังคุยโทรศัพท์ — เป็น "คำพูดในสาย" ล้วน ๆ 1-3 ประโยค.`,
-            `ห้ามใส่การกระทำ/คำบรรยายในวงเล็บ. ห้ามใส่ * . ห้ามใส่ชื่อขึ้นต้น. ห้ามใส่ think/แท็กใด ๆ. ใช้ภาษาเดียวกับที่คุย.`,
+            `[Phone call — you are ${dname(c)}, ${opener ? `you just called ${userName}` : `on a call with ${userName}`}.]`,
+            persona ? `Character info for ${dname(c)}: ${persona}` : null,
+            opener ? `You are the one who called. Open the conversation first — say why you're calling.` : (recent ? `Recent call dialogue:\n${recent}` : 'Continue the conversation naturally.'),
+            `\nReply in character as ${dname(c)} on the phone — spoken words only, 1-3 sentences.`,
+            `Reply in the SAME language the conversation uses (Thai if Thai).`,
+            `STRICT: no emoji, no parenthetical actions, no asterisks, no name prefix, no think/tags.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 3);
-        const nameRx = new RegExp('^' + c.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
+        const nameRx = new RegExp('^' + dname(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
         raw = raw.replace(nameRx, '').trim();
         let text = raw.split(/\n+/).map(l => l.trim()).filter(Boolean).slice(0, 3).join(' ');
-        text = text.replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\*[^*]*\*/g, '').replace(/\s+/g, ' ').trim() || '…';
+        text = text.replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\*[^*]*\*/g, '');
+        text = stripEmoji(text).replace(/\s+/g, ' ').trim() || '…';
         if (ppCall) ppCallFloat(text, 'them');
     } catch (e) {
         ppToast('สายไม่ชัด ลองอีกครั้ง');
@@ -982,38 +1086,55 @@ function ppEndCall() {
     clearInterval(ppCall.interval);
     const secs = ppCall.startTime ? Math.floor((Date.now() - ppCall.startTime) / 1000) : 0;
     const durText = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}`;
+    const wasConnected = ppCall.connected;
+    const wasIncoming = ppCall.incoming;
+    const transcript = ppCall.transcript.slice();
     const cfg = getCfg();
-    if (ppCall.connected) {
+    if (wasConnected) {
         cfg.callLog.unshift({
-            cid: c.id, name: c.name, avatar: c.avatar,
-            startISO: new Date().toISOString(), duration: secs, durText,
-            transcript: ppCall.transcript.slice(),
+            cid: c.id, name: dname(c), avatar: c.avatar,
+            startISO: new Date().toISOString(), duration: secs, durText, transcript, incoming: wasIncoming,
         });
-        if (cfg.callLog.length > 50) cfg.callLog = cfg.callLog.slice(0, 50);
+        if (cfg.callLog.length > 80) cfg.callLog = cfg.callLog.slice(0, 80);
         getThread(c.id).push({ from: 'them', type: 'call', text: `โทรคุยกัน ${durText}`, ts: Date.now() });
     }
     saveCfg();
-    const wasConnected = ppCall.connected;
     ppCall = null;
     ppActiveContact = c;
     document.getElementById('pp-scr-call')?.classList.remove('ringing');
-    if (wasConnected) ppToast(`วางสาย · ${durText}`);
-    ppNav('chat');
+    // ★ หน้าจบสาย (ไม่ใช่ข้อความบื่อ ๆ)
+    if (wasConnected) {
+        const av = document.getElementById('pp-callend-av'); if (av) av.innerHTML = contactAvatarHTML(c, 100);
+        const nm = document.getElementById('pp-callend-name'); if (nm) nm.textContent = dname(c);
+        const dr = document.getElementById('pp-callend-dur'); if (dr) dr.textContent = `สนทนา ${durText}`;
+        const bg = document.getElementById('pp-callend-bg');
+        if (bg) { bg.style.backgroundImage = c.avatar ? `url(${c.avatar})` : ''; bg.classList.toggle('no-img', !c.avatar); }
+        ppNav('callend');
+    } else {
+        ppNav('chat');
+    }
 }
 
+// ── call log (แยกต่อแชท) ──
 function renderCallLog() {
     const list = document.getElementById('pp-calllog-list');
     if (!list) return;
-    const logs = getCfg().callLog || [];
+    const title = document.getElementById('pp-calllog-title');
+    let logs = getCfg().callLog || [];
+    if (ppCallLogSource) {
+        logs = logs.filter(l => l.cid === ppCallLogSource);
+        const c = getContacts().find(x => x.id === ppCallLogSource);
+        if (title) title.textContent = c ? `สายกับ ${dname(c)}` : 'ประวัติการโทร';
+    } else if (title) title.textContent = 'ประวัติการโทร';
     if (!logs.length) { list.innerHTML = `<div class="pp-empty">ยังไม่มีประวัติการโทร</div>`; return; }
     list.innerHTML = logs.map((l, i) => {
+        const gi = (getCfg().callLog || []).indexOf(l);
         const d = new Date(l.startISO);
-        const ds = `${d.getDate()}/${d.getMonth() + 1} ${String(d.getHours())}:${String(d.getMinutes()).padStart(2, '0')}`;
-        const c = { name: l.name, avatar: l.avatar };
-        return `<div class="pp-calllog-row" data-calllog="${i}">
-            ${contactAvatarHTML(c, 46)}
+        const ds = `${d.getDate()}/${d.getMonth() + 1} ${fmtHM(d)}`;
+        return `<div class="pp-calllog-row" data-calllog="${gi}">
+            ${contactAvatarHTML({ name: l.name, avatar: l.avatar }, 46)}
             <div class="pp-row-meta">
-                <div class="pp-row-name">${esc(l.name)}</div>
+                <div class="pp-row-name">${esc(l.name)}${l.incoming ? ' · เข้า' : ''}</div>
                 <div class="pp-row-preview">${esc(ds)}</div>
             </div>
             <span class="pp-calllog-dur">${esc(l.durText)}</span>
@@ -1046,15 +1167,39 @@ function injectPhone() {
 
     document.getElementById('pp-frame')?.addEventListener('click', e => {
         const island = e.target.closest('#pp-island');
-        if (island && island.dataset.cid) { const cid = island.dataset.cid; islandCollapse(); ppOpenThread(cid); return; }
+        if (island && island.dataset.cid) { const cid = island.dataset.cid; if (ppGeneratingId !== cid) islandCollapse(); ppOpenThread(cid); return; }
+        // list edit
+        if (e.target.closest('#pp-list-edit-btn')) {
+            ppListEditMode = !ppListEditMode;
+            const b = document.getElementById('pp-list-edit-btn'); if (b) b.textContent = ppListEditMode ? 'เสร็จ' : 'แก้ไข';
+            renderContactList(); return;
+        }
+        const pin = e.target.closest('[data-pin]');
+        if (pin) { e.stopPropagation(); ppTogglePin(pin.dataset.pin); return; }
+        const delc = e.target.closest('[data-delchat]');
+        if (delc) { e.stopPropagation(); ppDeleteChat(delc.dataset.delchat); return; }
+        // call controls
         if (e.target.closest('#pp-chat-call-btn')) { ppStartCall(); return; }
         if (e.target.closest('#pp-call-accept')) { ppAcceptCall(); return; }
         if (e.target.closest('#pp-call-decline')) { ppDeclineCall(); return; }
         if (e.target.closest('#pp-call-end')) { ppEndCall(); return; }
-        if (e.target.closest('#pp-call-mute')) { e.currentTarget; document.getElementById('pp-call-mute')?.classList.toggle('on'); return; }
+        if (e.target.closest('#pp-callend-ok')) { ppNav('chat'); return; }
+        if (e.target.closest('#pp-call-mute')) { document.getElementById('pp-call-mute')?.classList.toggle('on'); return; }
         if (e.target.closest('#pp-call-speaker')) { document.getElementById('pp-call-speaker')?.classList.toggle('on'); return; }
+        // chat settings
         if (e.target.closest('#pp-chat-menu-btn')) { toggleChatSettings(); return; }
-        if (e.target.closest('#pp-calllog-btn')) { document.getElementById('pp-chat-settings')?.classList.remove('show'); ppNav('calllog'); return; }
+        if (e.target.closest('#pp-rename-save')) {
+            if (ppActiveContact) {
+                const v = document.getElementById('pp-rename-input')?.value.trim() || '';
+                ppActiveContact.customName = v || undefined;
+                const stored = getContacts().find(x => x.id === ppActiveContact.id);
+                if (stored) stored.customName = v || undefined;
+                saveCfg(); renderThread(); ppToast('เปลี่ยนชื่อแล้ว');
+            }
+            return;
+        }
+        if (e.target.closest('#pp-calllog-btn')) { document.getElementById('pp-chat-settings')?.classList.remove('show'); ppCallLogSource = ppActiveContact ? ppActiveContact.id : null; ppNav('calllog'); return; }
+        if (e.target.closest('#pp-calllog-back')) { ppNav(ppCallLogSource ? 'chat' : 'messages'); ppCallLogSource = null; return; }
         if (e.target.closest('#pp-edit-toggle')) {
             ppEditMode = !ppEditMode;
             document.getElementById('pp-edit-toggle')?.classList.toggle('on', ppEditMode);
@@ -1106,6 +1251,7 @@ function injectPhone() {
 
     document.getElementById('pp-set-dark')?.addEventListener('change', e => { getCfg().theme = e.target.checked ? 'dark' : 'light'; saveCfg(); applyTheme(); });
     document.getElementById('pp-set-island')?.addEventListener('change', e => { getCfg().dynamicIsland = e.target.checked; saveCfg(); applyIsland(); islandRefresh(); });
+    document.getElementById('pp-set-scope2')?.addEventListener('change', e => { getCfg().islandScope = e.target.checked ? 'always' : 'phone'; saveCfg(); islandRefresh(); syncDrawer(); });
     document.getElementById('pp-set-accent')?.addEventListener('input', e => { getCfg().accent = e.target.value; saveCfg(); applyTheme(); applyChatStyle(); });
     document.getElementById('pp-set-blur')?.addEventListener('input', e => { getCfg().homeBlur = +e.target.value; saveCfg(); applyWallpaper(); });
     document.getElementById('pp-set-wp-file')?.addEventListener('change', e => {
@@ -1145,10 +1291,11 @@ function injectExternalIsland() {
     if (document.getElementById('pp-ext-island')) return;
     const el = document.createElement('div');
     el.id = 'pp-ext-island';
-    el.style.display = 'none';
+    // ★ ตำแหน่งต่ำลง ไม่บังปุ่มบนสุด (inline เพื่อไม่ต้องแก้ CSS)
+    el.style.cssText = 'position:fixed;top:64px;left:50%;transform:translateX(-50%);width:120px;height:34px;border-radius:20px;background:#000;z-index:2147483000;overflow:hidden;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.12),0 4px 16px rgba(0,0,0,.6);align-items:center;justify-content:center;cursor:pointer;display:none;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;transition:width .55s cubic-bezier(.32,1.35,.36,1),height .55s cubic-bezier(.32,1.35,.36,1),border-radius .5s ease;';
     el.addEventListener('click', () => {
         const cid = el.dataset.cid;
-        islandCollapse();
+        // ★ เปิดมือถือ + เข้าห้อง แต่ไม่ collapse island (ให้ islandRefresh ย้ายเข้าจอเอง)
         ppOpen();
         if (cid) ppOpenThread(cid);
     });
@@ -1171,6 +1318,9 @@ function injectFab() {
     if (!placed) { fab.classList.add('pp-fab-float'); document.body.appendChild(fab); }
 }
 
+function syncDrawer() {
+    const s = document.getElementById('pp-set-scope'); if (s) s.checked = getCfg().islandScope === 'always';
+}
 function registerSettingsPanel() {
     const target = document.getElementById('extensions_settings');
     if (!target || document.getElementById('pp-settings-panel')) return;
@@ -1185,7 +1335,7 @@ function registerSettingsPanel() {
     <label style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
       <input type="checkbox" id="pp-set-scope"> ให้ Dynamic Island ลอยอยู่นอกมือถือด้วย (แม้ปิดมือถือ)
     </label>
-    <div style="font-size:11px;opacity:.6;margin-bottom:12px">ปิด = Island อยู่แค่ในมือถือ · เปิด = แจ้งเตือน/ตอบกลับเด้งนอกจอเลย</div>
+    <div style="font-size:11px;opacity:.6;margin-bottom:12px">ตั้งค่าเดียวกันนี้มีในแอป Settings ของมือถือด้วย</div>
     <input id="pp-open-btn" class="menu_button" type="button" value="เปิดมือถือ">
     <input id="pp-diag-btn" class="menu_button" type="button" value="Diagnostics">
   </div>
@@ -1194,7 +1344,7 @@ function registerSettingsPanel() {
     const scopeBox = document.getElementById('pp-set-scope');
     if (scopeBox) {
         scopeBox.checked = getCfg().islandScope === 'always';
-        scopeBox.addEventListener('change', () => { getCfg().islandScope = scopeBox.checked ? 'always' : 'phone'; saveCfg(); islandRefresh(); });
+        scopeBox.addEventListener('change', () => { getCfg().islandScope = scopeBox.checked ? 'always' : 'phone'; saveCfg(); islandRefresh(); renderPhoneSettings(); });
     }
     document.getElementById('pp-open-btn')?.addEventListener('click', ppOpen);
     document.getElementById('pp-diag-btn')?.addEventListener('click', () => window.PP_DIAG());
@@ -1208,7 +1358,7 @@ window.PP_DIAG = function () {
         genQuiet: !!(c && typeof c.generateQuietPrompt === 'function'),
         localforage: !!mediaStore(),
         chars: listStCharacters().length, contacts: getContacts().length,
-        callLog: (getCfg().callLog || []).length, inCall: !!ppCall,
+        pinned: (getCfg().pinned || []).length, callLog: (getCfg().callLog || []).length, inCall: !!ppCall,
         generating: ppGeneratingId, wallpaper: getCfg().wallpaper,
         islandScope: getCfg().islandScope, theme: getCfg().theme, island: getCfg().dynamicIsland,
     };
