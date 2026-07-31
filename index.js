@@ -5,7 +5,7 @@
 import {
     S, ctx, PP_VERSION, MODULE_NAME, APPS, ICON,
     getCfg, saveCfg, esc, dname, getUserName, getContacts,
-    getUserNote, isPinned,
+    getUserNote, isPinned, ppNav,
     applyTheme, applyIsland, applyWallpaper, startClock, refreshUserAvatar,
     ppToast, islandRefresh,
 } from './core.js';
@@ -54,8 +54,6 @@ export function ppNav(screen) {
         ppToast('เร็ว ๆ นี้: ' + screen);
     }
 }
-// core.js เรียก ppNav ผ่าน window (กัน circular import)
-window.__ppNav = ppNav;
 
 // ── buildPhone: ประกอบจากชิ้นของแต่ละแอป ──
 function buildPhone() {
