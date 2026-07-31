@@ -117,3 +117,5 @@ export function settingsBindInputs() {
     fileToMedia('pp-set-wp-file', () => 'home-wp', async () => { getCfg().wallpaper = 'custom'; saveCfg(); applyWallpaper(); renderPhoneSettings(); ppToast('ตั้งวอลเปเปอร์แล้ว'); });
     fileToMedia('pp-user-av-file', () => 'user-avatar', async () => { getCfg().userAvatarMode = 'custom'; saveCfg(); await refreshUserAvatar(); renderPhoneSettings(); renderNotesRow(); ppToast('ตั้งรูปโปรไฟล์แล้ว'); });
 }
+
+S._render.phoneSettings = renderPhoneSettings;
