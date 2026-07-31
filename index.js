@@ -1,7 +1,7 @@
-// pocket-phone/index.js — Stage 7a: sort+time+pin · rename · ban emoji · per-chat call log · call-end screen · island fixes · Story removed
+// pocket-phone/index.js — Stage 7a-fix2: bot decides to call (toggle) · ? help popup · richer farewell keywords
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 
-const PP_VERSION = '0.8.0-stage7a';
+const PP_VERSION = '0.8.2-stage7a';
 const MODULE_NAME = 'pocket-phone'; // ⚠️ ต้องตรงกับชื่อโฟลเดอร์/repo
 
 function ctx() {
@@ -54,11 +54,12 @@ const DEFAULTS = {
     islandScope: 'phone',
     wallpaper: 'aurora',
     homeBlur: 6,
-    contacts: [],       // { id, name, avatar, customName? }
+    botDecidesCall: false,   // ★ ให้บอทตัดสินใจโทรเอง (ปิดไว้เป็นค่าเริ่มต้น = ประหยัด)
+    contacts: [],
     threads: {},
     chatStyle: {},
-    callLog: [],         // { cid, name, avatar, startISO, duration, durText, transcript, incoming }
-    pinned: [],          // [id...]
+    callLog: [],
+    pinned: [],
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -83,7 +84,6 @@ function saveCfg() {
 const esc = s => String(s == null ? '' : s)
     .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
 
-// กรอง CoT/junk
 function cleanReply(t) {
     let s = String(t || '');
     s = s.replace(/<think>[\s\S]*?<\/think>/gi, '');
@@ -91,7 +91,6 @@ function cleanReply(t) {
     s = s.replace(/\[(?:CoT|COT|THINK|SYSTEM|CONTEXT|PERSONA|PHASE|STEP)[^\]]*\][^\n]*/gi, '');
     return s.trim();
 }
-// ★ กรองอิโมจิทิ้งทั้งหมด (บอทห้ามใช้)
 function stripEmoji(t) {
     return String(t || '')
         .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')
@@ -102,6 +101,12 @@ function stripEmoji(t) {
         .replace(/[\uFE0F\u200D\u20E3]/gu, '')
         .replace(/[ \t]{2,}/g, ' ')
         .trim();
+}
+// ★ คีย์เวิร์ดคำลา (ขยายให้ครอบคลุมขึ้น) → บอทวางสายเอง ไม่ต้องยิงถามแยก
+function isFarewell(t) {
+    const s = String(t || '').toLowerCase();
+    if (/\b(bye+|goodbye|talk (to you )?later|see (you|ya)|see u|gtg|got to go|gotta go|hang up|catch you later|call you (back|later)|take care)\b/.test(s)) return true;
+    return /(บายนะ|บายๆ|บาย|วางก่อน|วางละ|วางสายก่อน|วางสายละ|ไปก่อนนะ|ไปก่อน|ไปละ|ต้องไปแล้ว|ต้องวางแล้ว|แล้วเจอกัน|แล้วเจอกันนะ|แล้วค่อยคุย|ไว้คุยกัน|ไว้คุยกันใหม่|ไว้คุยใหม่|แค่นี้ก่อน|แค่นี้ก่อนนะ|เดี๋ยวโทรใหม่|เดี๋ยวโทรกลับ|ราตรีสวัสดิ์|ฝันดี|โชคดีนะ|ดูแลตัวเองด้วย)/.test(t || '');
 }
 function getUserName() {
     const c = ctx();
@@ -124,7 +129,6 @@ function ppDateLabel() {
 const TH_DAYS = ['อา.', 'จ.', 'อ.', 'พ.', 'พฤ.', 'ศ.', 'ส.'];
 const TH_MONTHS = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
 function fmtHM(d) { return `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`; }
-// เวลาในหน้ารายชื่อ
 function fmtListTime(ts) {
     if (!ts) return '';
     const d = new Date(ts), today = new Date();
@@ -134,14 +138,12 @@ function fmtListTime(ts) {
     if ((today - d) < 7 * 86400000) return TH_DAYS[d.getDay()];
     return `${d.getDate()}/${d.getMonth() + 1}`;
 }
-// หัวแชท (โชว์เสมอ)
 function chatDividerFull(ts) {
     if (!ts) return '';
     const d = new Date(ts), today = new Date();
     if (d.toDateString() === today.toDateString()) return `วันนี้ ${fmtHM(d)}`;
     return `${TH_DAYS[d.getDay()]} ${d.getDate()} ${TH_MONTHS[d.getMonth()]} · ${fmtHM(d)}`;
 }
-// ระหว่างข้อความ — ห่างเกิน 5 นาที
 function chatDivider(prevTs, ts) {
     if (!prevTs || !ts) return '';
     const gap = ts - prevTs;
@@ -212,8 +214,9 @@ async function applyWallpaper() {
 let ppActiveContact = null;
 let ppGeneratingId = null;
 let ppCurrentScreen = 'home';
-let ppEditMode = false;        // edit ในหน้าแชท (ลบข้อความ)
-let ppListEditMode = false;    // edit ในหน้ารายชื่อ (ปักหมุด/ลบแชท)
+let ppEditMode = false;
+let ppListEditMode = false;
+let ppCallLogEdit = false;
 
 function ppNav(screen) {
     ppCurrentScreen = screen;
@@ -242,6 +245,23 @@ function ppToast(msg) {
     t.classList.add('show');
     clearTimeout(t._timer);
     t._timer = setTimeout(() => t.classList.remove('show'), 2000);
+}
+
+// ★ popup ขยายความ (ใช้ซ้ำได้ เผื่อ toggle อื่น)
+function ppHelpPopup(title, body) {
+    const host = document.getElementById('pp-frame') || document.body;
+    const ov = document.createElement('div');
+    ov.className = 'pp-help-ov';
+    ov.style.cssText = 'position:absolute;inset:0;z-index:9500;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);padding:28px;box-sizing:border-box;';
+    ov.innerHTML = `<div style="background:rgba(50,50,54,.96);backdrop-filter:blur(30px);border-radius:18px;max-width:300px;width:100%;padding:20px;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+        <div style="font-size:16px;font-weight:700;color:#fff;margin-bottom:8px">${esc(title)}</div>
+        <div style="font-size:13px;line-height:1.55;color:rgba(235,235,245,.85)">${body}</div>
+        <button class="pp-help-close" style="margin-top:16px;width:100%;background:var(--pp-accent,#0a84ff);border:none;color:#fff;border-radius:14px;padding:11px;font-size:15px;font-weight:600;cursor:pointer">เข้าใจแล้ว</button>
+    </div>`;
+    host.appendChild(ov);
+    const close = () => ov.remove();
+    ov.querySelector('.pp-help-close')?.addEventListener('click', close);
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
 }
 
 // ── avatar ──
@@ -426,6 +446,13 @@ function buildPhone() {
             <div class="pp-set-row"><span>Dynamic Island</span><label class="pp-switch"><input type="checkbox" id="pp-set-island"><span></span></label></div>
             <div class="pp-set-row"><span>Island นอกมือถือ (แม้ปิด)</span><label class="pp-switch"><input type="checkbox" id="pp-set-scope2"><span></span></label></div>
           </div>
+          <div class="pp-set-label">โทรศัพท์</div>
+          <div class="pp-set-group">
+            <div class="pp-set-row">
+              <span style="display:flex;align-items:center;gap:8px">ให้บอทโทรหาเอง <button class="pp-help-btn" id="pp-help-botcall">?</button><span style="font-size:12px;color:var(--pp-txt3)">~+50–120 โทเคน/ครั้ง</span></span>
+              <label class="pp-switch"><input type="checkbox" id="pp-set-botcall"><span></span></label>
+            </div>
+          </div>
           <div class="pp-set-label">สีหลัก (Accent)</div>
           <div class="pp-set-group"><div class="pp-set-row"><span>เลือกสี</span><label class="pp-color-wrap"><input type="color" id="pp-set-accent" value="#0a84ff"><span></span></label></div></div>
           <div class="pp-set-label">พื้นหลังหน้าจอ</div>
@@ -488,7 +515,7 @@ function buildPhone() {
         <div class="pp-nav">
           <button class="pp-nav-back" id="pp-calllog-back">${ICON.back}</button>
           <span class="pp-nav-title" id="pp-calllog-title">ประวัติการโทร</span>
-          <span style="width:34px"></span>
+          <button class="pp-nav-action" id="pp-calllog-edit-btn" style="width:auto;font-size:15px;font-weight:600">แก้ไข</button>
         </div>
         <div class="pp-list" id="pp-calllog-list"></div>
         <div class="pp-home-bar"></div>
@@ -516,7 +543,6 @@ function renderContactList(filter) {
     if (!list) return;
     let contacts = getContacts().slice();
     if (filter) contacts = contacts.filter(c => dname(c).toLowerCase().includes(filter.toLowerCase()));
-    // เรียง: หมุดก่อน แล้วตามเวลาล่าสุด
     contacts.sort((a, b) => {
         const pa = isPinned(a.id) ? 1 : 0, pb = isPinned(b.id) ? 1 : 0;
         if (pa !== pb) return pb - pa;
@@ -692,13 +718,15 @@ function markChatSwatches() {
 let ppIslandState = null;
 let ppIslandTimer = null;
 function renderIslandInto(el, state) {
+    const isExt = el.id === 'pp-ext-island';
     if (!state) {
         el.classList.remove('pp-island-live');
-        setTimeout(() => { if (!el.classList.contains('pp-island-live')) { el.innerHTML = ''; delete el.dataset.cid; if (el.id === 'pp-ext-island') el.style.display = 'none'; } }, 560);
+        if (isExt) { el.style.width = '120px'; el.style.height = '34px'; el.style.borderRadius = '20px'; el.style.justifyContent = 'center'; el.style.padding = '0'; el.style.gap = '0'; }
+        setTimeout(() => { if (!el.classList.contains('pp-island-live')) { el.innerHTML = ''; delete el.dataset.cid; if (isExt) el.style.display = 'none'; } }, 560);
         return;
     }
     el.dataset.cid = state.cid;
-    if (el.id === 'pp-ext-island') el.style.display = 'flex';
+    if (isExt) el.style.display = 'flex';
     const av = state.avatar
         ? `<img class="pp-island-av" src="${esc(state.avatar)}" onerror="this.style.visibility='hidden'">`
         : `<span class="pp-island-av pp-island-av-fb">${esc((state.name || '?')[0])}</span>`;
@@ -707,7 +735,17 @@ function renderIslandInto(el, state) {
         : `<div class="pp-island-msg">${esc(state.text || '')}</div>`;
     el.innerHTML = `${av}<div class="pp-island-body"><div class="pp-island-name">${esc(state.name)}</div>${body}</div>`;
     void el.offsetWidth;
-    requestAnimationFrame(() => el.classList.add('pp-island-live'));
+    requestAnimationFrame(() => {
+        el.classList.add('pp-island-live');
+        if (isExt) {
+            el.style.width = 'min(340px, 92vw)';
+            el.style.height = '66px';
+            el.style.borderRadius = '30px';
+            el.style.justifyContent = 'flex-start';
+            el.style.padding = '0 16px';
+            el.style.gap = '12px';
+        }
+    });
 }
 function islandRefresh() {
     const internal = document.getElementById('pp-island');
@@ -825,6 +863,33 @@ async function genWithRetry(prompt, tries) {
     return '';
 }
 
+// ★ ให้บอทตัดสินใจเองว่าจะโทรหรือพิมพ์ตอบ — คืน true = โทร
+async function ppDecideCall(c) {
+    try {
+        const userName = getUserName();
+        const persona = getContactPersona(c.id);
+        const th = getThread(c.id).slice(-6);
+        const histTxt = th.map(m => {
+            if (m.type === 'call') return `[${m.text}]`;
+            return `${m.from === 'me' ? userName : dname(c)}: ${m.text}`;
+        }).join('\n');
+        const prompt = [
+            `[Decision — you are ${dname(c)}, in a text chat with ${userName}.]`,
+            persona ? `Character info: ${persona.slice(0, 400)}` : null,
+            histTxt ? `Recent messages:\n${histTxt}` : null,
+            `Given the mood and context, would ${dname(c)} rather CALL ${userName} right now, or reply by TEXT?`,
+            `Only call if it genuinely fits the character and moment (urgency, strong emotion, something better said by voice). Otherwise text.`,
+            `Answer with ONE word only: CALL or TEXT.`,
+        ].filter(Boolean).join('\n');
+        const raw = await genOnce(prompt);
+        const ans = cleanReply(raw).toUpperCase();
+        return /\bCALL\b/.test(ans) && !/\bTEXT\b/.test(ans.replace(/\bCALL\b/, ''));
+    } catch (e) {
+        console.warn('[pocket-phone] decideCall failed, default TEXT', e);
+        return false;
+    }
+}
+
 async function ppRegenerate() {
     const c = ppActiveContact;
     if (!c || ppGeneratingId) return;
@@ -844,8 +909,20 @@ async function ppGenerateReply() {
         ppToast('พิมพ์ข้อความก่อน แล้วค่อยกดให้บอทตอบ');
         return;
     }
-    // โอกาสที่บอทจะโทรเข้าแทนการพิมพ์
-    if (ppViewing(c) && Math.random() < 0.14) { ppIncomingCall(c); return; }
+
+    // ★ บอทตัดสินใจโทรเอง (ถ้าเปิด toggle) — แทนการสุ่มมโน
+    if (getCfg().botDecidesCall && ppViewing(c)) {
+        ppGeneratingId = c.id;
+        const gb = document.getElementById('pp-gen'); if (gb) gb.disabled = true;
+        showTyping(); islandTyping(c); renderContactList();
+        let wantsCall = false;
+        try { wantsCall = await ppDecideCall(c); } catch {}
+        ppGeneratingId = null;
+        hideTyping(); islandCollapse();
+        if (gb) gb.disabled = false;
+        if (wantsCall) { ppIncomingCall(c); return; }
+        // ไม่โทร → ตกลงมาพิมพ์ตอบตามปกติ
+    }
 
     ppGeneratingId = c.id;
     const genBtn = document.getElementById('pp-gen');
@@ -865,7 +942,6 @@ async function ppGenerateReply() {
             return `${m.from === 'me' ? userName : dname(c)}: ${m.text}`;
         }).join('\n');
 
-        // prompt เป็นอังกฤษ สั่งตอบไทย/ตามภาษาที่คุย + ห้ามอิโมจิ
         const prompt = [
             `[Text messaging app — you are ${dname(c)}, chatting with ${userName}.]`,
             persona ? `Character info for ${dname(c)}: ${persona}` : null,
@@ -921,6 +997,7 @@ function renderPhoneSettings() {
     const d = document.getElementById('pp-set-dark'); if (d) d.checked = cfg.theme === 'dark';
     const i = document.getElementById('pp-set-island'); if (i) i.checked = cfg.dynamicIsland;
     const sc = document.getElementById('pp-set-scope2'); if (sc) sc.checked = cfg.islandScope === 'always';
+    const bc = document.getElementById('pp-set-botcall'); if (bc) bc.checked = !!cfg.botDecidesCall;
     const a = document.getElementById('pp-set-accent'); if (a) a.value = cfg.accent || '#0a84ff';
     const b = document.getElementById('pp-set-blur'); if (b) b.value = cfg.homeBlur ?? 6;
     const wpWrap = document.getElementById('pp-set-wp-swatches');
@@ -932,8 +1009,8 @@ function renderPhoneSettings() {
 }
 
 // ── CALL SYSTEM ──
-let ppCall = null; // { contact, startTime, interval, transcript, generating, connected, incoming }
-let ppCallLogSource = null; // แชทที่กำลังดูประวัติการโทรอยู่
+let ppCall = null;
+let ppCallLogSource = null;
 
 function setCallScreen(c) {
     const nm = document.getElementById('pp-call-name'); if (nm) nm.textContent = dname(c);
@@ -968,7 +1045,6 @@ function ppIncomingCall(c) {
     const sub = document.getElementById('pp-call-sub'); if (sub) sub.textContent = 'สายเรียกเข้า';
     const st = document.getElementById('pp-call-status'); if (st) st.textContent = 'Pocket Phone Audio…';
     ppNav('call');
-    // แจ้งเตือนใน Island ว่ามีสายเรียกเข้า
     ppIslandState = { cid: c.id, name: dname(c), avatar: c.avatar, kind: 'msg', text: 'สายเรียกเข้า…' };
     islandRefresh();
 }
@@ -978,7 +1054,7 @@ function ppAcceptCall() {
     document.getElementById('pp-scr-call')?.classList.remove('ringing');
     const sub = document.getElementById('pp-call-sub'); if (sub) sub.textContent = 'Pocket Phone Audio';
     islandCollapse();
-    ppConnectCall(true); // ★ บอทเป็นคนโทร → พูดเปิดทันที
+    ppConnectCall(true);
 }
 function ppDeclineCall() {
     if (!ppCall) return;
@@ -1050,6 +1126,7 @@ async function ppCallGenerate() {
     ppCall.generating = true;
     const btn = document.getElementById('pp-call-gen'); if (btn) btn.disabled = true;
     const ty = document.getElementById('pp-call-typing'); if (ty) ty.classList.add('show');
+    let saidBye = false;
     try {
         const userName = getUserName();
         const persona = getContactPersona(c.id);
@@ -1069,6 +1146,7 @@ async function ppCallGenerate() {
         let text = raw.split(/\n+/).map(l => l.trim()).filter(Boolean).slice(0, 3).join(' ');
         text = text.replace(/[\(（][^\)）]*[\)）]/g, '').replace(/\*[^*]*\*/g, '');
         text = stripEmoji(text).replace(/\s+/g, ' ').trim() || '…';
+        saidBye = isFarewell(text);
         if (ppCall) ppCallFloat(text, 'them');
     } catch (e) {
         ppToast('สายไม่ชัด ลองอีกครั้ง');
@@ -1077,6 +1155,7 @@ async function ppCallGenerate() {
         if (ppCall) ppCall.generating = false;
         if (btn) btn.disabled = false;
         const ty2 = document.getElementById('pp-call-typing'); if (ty2) ty2.classList.remove('show');
+        if (saidBye && ppCall) setTimeout(() => { if (ppCall) ppEndCall(); }, 2200);
     }
 }
 
@@ -1102,7 +1181,7 @@ function ppEndCall() {
     ppCall = null;
     ppActiveContact = c;
     document.getElementById('pp-scr-call')?.classList.remove('ringing');
-    // ★ หน้าจบสาย (ไม่ใช่ข้อความบื่อ ๆ)
+    islandCollapse();
     if (wasConnected) {
         const av = document.getElementById('pp-callend-av'); if (av) av.innerHTML = contactAvatarHTML(c, 100);
         const nm = document.getElementById('pp-callend-name'); if (nm) nm.textContent = dname(c);
@@ -1126,20 +1205,33 @@ function renderCallLog() {
         const c = getContacts().find(x => x.id === ppCallLogSource);
         if (title) title.textContent = c ? `สายกับ ${dname(c)}` : 'ประวัติการโทร';
     } else if (title) title.textContent = 'ประวัติการโทร';
+    const editBtn = document.getElementById('pp-calllog-edit-btn');
+    if (editBtn) editBtn.textContent = ppCallLogEdit ? 'เสร็จ' : 'แก้ไข';
     if (!logs.length) { list.innerHTML = `<div class="pp-empty">ยังไม่มีประวัติการโทร</div>`; return; }
-    list.innerHTML = logs.map((l, i) => {
+    list.innerHTML = logs.map(l => {
         const gi = (getCfg().callLog || []).indexOf(l);
         const d = new Date(l.startISO);
         const ds = `${d.getDate()}/${d.getMonth() + 1} ${fmtHM(d)}`;
-        return `<div class="pp-calllog-row" data-calllog="${gi}">
+        const delBtn = ppCallLogEdit
+            ? `<button class="pp-cs-btn" data-dellog="${gi}" style="padding:6px 10px;background:rgba(255,69,58,.85);color:#fff;flex-shrink:0">${ICON.trash}</button>`
+            : `<span class="pp-calllog-dur">${esc(l.durText)}</span>`;
+        return `<div class="pp-calllog-row" ${ppCallLogEdit ? '' : `data-calllog="${gi}"`}>
             ${contactAvatarHTML({ name: l.name, avatar: l.avatar }, 46)}
             <div class="pp-row-meta">
                 <div class="pp-row-name">${esc(l.name)}${l.incoming ? ' · เข้า' : ''}</div>
                 <div class="pp-row-preview">${esc(ds)}</div>
             </div>
-            <span class="pp-calllog-dur">${esc(l.durText)}</span>
+            ${delBtn}
         </div>`;
     }).join('');
+}
+function ppDeleteCallLog(gi) {
+    const cfg = getCfg();
+    if (gi < 0 || gi >= (cfg.callLog || []).length) return;
+    cfg.callLog.splice(gi, 1);
+    saveCfg();
+    renderCallLog();
+    ppToast('ลบรายการแล้ว');
 }
 function ppShowTranscript(i) {
     const l = (getCfg().callLog || [])[i];
@@ -1168,7 +1260,6 @@ function injectPhone() {
     document.getElementById('pp-frame')?.addEventListener('click', e => {
         const island = e.target.closest('#pp-island');
         if (island && island.dataset.cid) { const cid = island.dataset.cid; if (ppGeneratingId !== cid) islandCollapse(); ppOpenThread(cid); return; }
-        // list edit
         if (e.target.closest('#pp-list-edit-btn')) {
             ppListEditMode = !ppListEditMode;
             const b = document.getElementById('pp-list-edit-btn'); if (b) b.textContent = ppListEditMode ? 'เสร็จ' : 'แก้ไข';
@@ -1178,7 +1269,6 @@ function injectPhone() {
         if (pin) { e.stopPropagation(); ppTogglePin(pin.dataset.pin); return; }
         const delc = e.target.closest('[data-delchat]');
         if (delc) { e.stopPropagation(); ppDeleteChat(delc.dataset.delchat); return; }
-        // call controls
         if (e.target.closest('#pp-chat-call-btn')) { ppStartCall(); return; }
         if (e.target.closest('#pp-call-accept')) { ppAcceptCall(); return; }
         if (e.target.closest('#pp-call-decline')) { ppDeclineCall(); return; }
@@ -1186,7 +1276,7 @@ function injectPhone() {
         if (e.target.closest('#pp-callend-ok')) { ppNav('chat'); return; }
         if (e.target.closest('#pp-call-mute')) { document.getElementById('pp-call-mute')?.classList.toggle('on'); return; }
         if (e.target.closest('#pp-call-speaker')) { document.getElementById('pp-call-speaker')?.classList.toggle('on'); return; }
-        // chat settings
+        if (e.target.closest('#pp-help-botcall')) { ppHelpPopup('ให้บอทโทรหาเอง', 'เมื่อเปิด: ทุกครั้งที่กดให้บอทตอบ จะถามโมเดล 1 รอบสั้น ๆ ว่าตัวละครควรโทรหรือพิมพ์ตอบ ตามอารมณ์และบริบท<br><br>ใช้เพิ่มประมาณ <b>+50–120 โทเคน/ครั้ง</b> (input ~40–100 + output ~5–20) แกว่งตามความยาวบุคลิกตัวละครและโมเดลที่ใช้<br><br>ปิด = ประหยัด บอทจะไม่โทรเข้าเอง (ยังโทรออกหาบอทได้ตามปกติ)'); return; }
         if (e.target.closest('#pp-chat-menu-btn')) { toggleChatSettings(); return; }
         if (e.target.closest('#pp-rename-save')) {
             if (ppActiveContact) {
@@ -1198,8 +1288,11 @@ function injectPhone() {
             }
             return;
         }
-        if (e.target.closest('#pp-calllog-btn')) { document.getElementById('pp-chat-settings')?.classList.remove('show'); ppCallLogSource = ppActiveContact ? ppActiveContact.id : null; ppNav('calllog'); return; }
-        if (e.target.closest('#pp-calllog-back')) { ppNav(ppCallLogSource ? 'chat' : 'messages'); ppCallLogSource = null; return; }
+        if (e.target.closest('#pp-calllog-btn')) { document.getElementById('pp-chat-settings')?.classList.remove('show'); ppCallLogSource = ppActiveContact ? ppActiveContact.id : null; ppCallLogEdit = false; ppNav('calllog'); return; }
+        if (e.target.closest('#pp-calllog-back')) { ppNav(ppCallLogSource ? 'chat' : 'messages'); ppCallLogSource = null; ppCallLogEdit = false; return; }
+        if (e.target.closest('#pp-calllog-edit-btn')) { ppCallLogEdit = !ppCallLogEdit; renderCallLog(); return; }
+        const dellog = e.target.closest('[data-dellog]');
+        if (dellog) { e.stopPropagation(); ppDeleteCallLog(+dellog.dataset.dellog); return; }
         if (e.target.closest('#pp-edit-toggle')) {
             ppEditMode = !ppEditMode;
             document.getElementById('pp-edit-toggle')?.classList.toggle('on', ppEditMode);
@@ -1252,6 +1345,7 @@ function injectPhone() {
     document.getElementById('pp-set-dark')?.addEventListener('change', e => { getCfg().theme = e.target.checked ? 'dark' : 'light'; saveCfg(); applyTheme(); });
     document.getElementById('pp-set-island')?.addEventListener('change', e => { getCfg().dynamicIsland = e.target.checked; saveCfg(); applyIsland(); islandRefresh(); });
     document.getElementById('pp-set-scope2')?.addEventListener('change', e => { getCfg().islandScope = e.target.checked ? 'always' : 'phone'; saveCfg(); islandRefresh(); syncDrawer(); });
+    document.getElementById('pp-set-botcall')?.addEventListener('change', e => { getCfg().botDecidesCall = e.target.checked; saveCfg(); ppToast(e.target.checked ? 'บอทจะตัดสินใจโทรเอง' : 'ปิดการโทรของบอทแล้ว'); });
     document.getElementById('pp-set-accent')?.addEventListener('input', e => { getCfg().accent = e.target.value; saveCfg(); applyTheme(); applyChatStyle(); });
     document.getElementById('pp-set-blur')?.addEventListener('input', e => { getCfg().homeBlur = +e.target.value; saveCfg(); applyWallpaper(); });
     document.getElementById('pp-set-wp-file')?.addEventListener('change', e => {
@@ -1291,11 +1385,9 @@ function injectExternalIsland() {
     if (document.getElementById('pp-ext-island')) return;
     const el = document.createElement('div');
     el.id = 'pp-ext-island';
-    // ★ ตำแหน่งต่ำลง ไม่บังปุ่มบนสุด (inline เพื่อไม่ต้องแก้ CSS)
-    el.style.cssText = 'position:fixed;top:64px;left:50%;transform:translateX(-50%);width:120px;height:34px;border-radius:20px;background:#000;z-index:2147483000;overflow:hidden;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.12),0 4px 16px rgba(0,0,0,.6);align-items:center;justify-content:center;cursor:pointer;display:none;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;transition:width .55s cubic-bezier(.32,1.35,.36,1),height .55s cubic-bezier(.32,1.35,.36,1),border-radius .5s ease;';
+    el.style.cssText = 'position:fixed;top:64px;left:50%;transform:translateX(-50%);width:120px;height:34px;border-radius:20px;background:#000;z-index:2147483000;overflow:hidden;box-shadow:inset 0 0 0 .5px rgba(255,255,255,.12),0 4px 16px rgba(0,0,0,.6);align-items:center;justify-content:center;cursor:pointer;display:none;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;transition:width .55s cubic-bezier(.32,1.35,.36,1),height .55s cubic-bezier(.32,1.35,.36,1),border-radius .5s ease,padding .4s ease;';
     el.addEventListener('click', () => {
         const cid = el.dataset.cid;
-        // ★ เปิดมือถือ + เข้าห้อง แต่ไม่ collapse island (ให้ islandRefresh ย้ายเข้าจอเอง)
         ppOpen();
         if (cid) ppOpenThread(cid);
     });
@@ -1358,6 +1450,7 @@ window.PP_DIAG = function () {
         genQuiet: !!(c && typeof c.generateQuietPrompt === 'function'),
         localforage: !!mediaStore(),
         chars: listStCharacters().length, contacts: getContacts().length,
+        botDecidesCall: !!getCfg().botDecidesCall,
         pinned: (getCfg().pinned || []).length, callLog: (getCfg().callLog || []).length, inCall: !!ppCall,
         generating: ppGeneratingId, wallpaper: getCfg().wallpaper,
         islandScope: getCfg().islandScope, theme: getCfg().theme, island: getCfg().dynamicIsland,
