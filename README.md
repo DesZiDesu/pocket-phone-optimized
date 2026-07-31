@@ -1,42 +1,52 @@
-# iPhone Simulator v4.0 — SillyTavern Extension
+# Pocket Phone
 
-iOS-minimal phone simulator for SillyTavern with full bot integration.
+Extension มือถือจำลองสำหรับ SillyTavern — แชท โทร และโน้ตกับตัวละครของคุณ ในหน้าตาแบบมือถือเต็มจอ
 
-## Features
-- iOS minimal design — dark/light mode, accent colors, home wallpaper
-- **CoT / think-tag cleanup** — strips `<think>`, `[HELIOS]`, `[PHASE]`, `//--` etc. automatically
-- **{{user}} avatar** — pulls from SillyTavern persona
-- **History toggle** — per-character on/off + message limit
-- **Instagram** — stories (24h), notes, photo feed
-- **X / Twitter** — For You / Following / Trending tabs, compose, likes, RT, bot reactions
-- **Call + Chat split** — text while on a call, generate bot replies mid-call, call transcript log
-- **Wallpaper** — home screen + per-chat background (presets or upload)
-- **Messages** — stickers (AI-described), photos, voice, location, red envelope gift
-- **Bank** — transfer/receive, transaction history
-- **Edit mode** — delete individual messages
-- **Bot notes** — bot posts a status note visible in chat list & Instagram
-- **Call log** — full transcript viewer
+เวอร์ชันปัจจุบัน: 0.9.3
 
-## Installation
+## ฟีเจอร์ที่ใช้งานได้
 
-1. Go to **SillyTavern → Extensions → Install extension**
-2. 
-   ```
-   https://github.com/janzanaja188-cyber/sillytavern-pastel-mobile/tree/main
-   ```
-3. Or place the folder in `SillyTavern/public/scripts/extensions/third-party/iphone-simulator/`
-4. Reload SillyTavern — tap the 📱 button to open
+### แอป Messages (แชท)
+- เพิ่มตัวละครจาก SillyTavern มาเป็นคนคุยได้
+- แชทเป็นข้อความจริงผ่าน generateQuietPrompt (Enter = ส่ง · ปุ่มฟ้า = ให้บอทตอบ)
+- ฟองแชทจับกลุ่มแบบ iOS + ป้ายเวลาคั่น (หัวแชทเสมอ · คั่นเมื่อห่างเกิน 5 นาที)
+- หน้ารายชื่อแยก 3 หมวด: ปักหมุด · ตัวละคร · NPC — เรียงตามคุยล่าสุด
+- ปักหมุด / ลบแชท / เปลี่ยนชื่อที่แสดง (เปลี่ยนแค่ในมือถือ)
+- ลบข้อความ · รีเจนคำตอบล่าสุด
+- ปรับพื้นหลังแชท · สีฟอง · สีตัวอักษร · ใช้รูปเป็นพื้นฟอง — แยกต่อคน
+- แถวโน้ต (แบบ IG Notes) ใต้ช่องค้นหา: ผู้ใช้ลงเองได้ · บอทลงเองได้ผ่าน `[NOTE]` · หมดอายุใน 24 ชม.
 
-## Files
-| File | Purpose |
-|------|---------|
-| `index.js` | Main extension logic (~140 KB) |
-| `style.css` | Minimal stub (CSS injected by JS) |
-| `manifest.json` | Extension metadata |
+### ระบบโทร
+- โทรออกหาบอท / บอทโทรเข้าหาได้ (ผ่านคีย์เวิร์ด — เปิด/ปิดได้)
+- จับเวลานาที · จับเวลานาที
+- บอทวางสายเองได้เมื่อพูดคำร่ำลา
+- ประวัติการโทรแยกต่อแชท + ดูบทสนทนาย้อนหลัง + ลบได้
 
-## Usage
-- **📱 button** → open simulator
-- **Messages → +** → add a SillyTavern character as contact
-- **Generate Reply** → bot responds in character
-- **Call button** → voice call UI with simultaneous chat
-- **Settings** → theme, accent, wallpaper, sticker manager
+### Dynamic Island
+- โชว์สถานะ "กำลังพิมพ์" / คำตอบบอท · ค้างจนเจนเสร็จ
+- เลือกได้ว่าจะให้อยู่แค่ในมือถือ หรือลอยนอกมือถือแม้ปิดแอป
+
+### รวมจักรวาล (เปิด/ปิดได้)
+- เมื่อบอทเอ่ยชื่อคอนแทกต์อีกคน คนนั้นจะทักเข้ามาเอง (มีเหตุผลรองรับ ไม่สุ่มลอย ๆ)
+- ตัวเลือก "มีผลต่อโรลเพลย์หลัก" — ดึงบทจากแชทหลักมาให้บอทในมือถือจำได้
+
+### Settings
+- Dark mode · สี accent · วอลเปเปอร์ (พรีเซ็ต/อัปรูป/ปรับความเบลอ)
+- รูปโปรไฟล์ผู้ใช้ (ดึงอัตโนมัติ หรืออัปเอง)
+
+## ยังไม่เปิดใช้งาน
+แอป Feed และ Wallet ยังเป็นไอคอนเปล่า — จะทยอยเพิ่มในเวอร์ชันถัดไป
+
+## การติดตั้ง
+1. เปิด SillyTavern → Extensions → Install Extension
+2. วาง URL ของ repo นี้
+3. Refresh หน้า
+4. เปิดจากปุ่มลอยมุมขวาล่าง หรือเมนู wand (Extensions)
+
+## หมายเหตุ
+- ชื่อ repo = ชื่อโฟลเดอร์ = `pocket-phone` ต้องตรงกัน
+- ข้อมูลเก็บใน extensionSettings + localforage (รูปภาพ)
+- ตรวจเวอร์ชันได้ที่ดรอเวอร์ Pocket Phone ในหน้า Extensions
+
+## เครดิต
+พัฒนาร่วมกับ Kiro เอไอ ที่ช่วยทำ extension  รักทิ้สุดเลย
