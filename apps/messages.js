@@ -854,3 +854,8 @@ export function messagesBindInputs() {
     document.getElementById('pp-bubble-color')?.addEventListener('input', e => { if (S.activeContact) { getChatStyle(S.activeContact.id).bubble = e.target.value; getChatStyle(S.activeContact.id).bubbleImg = false; saveCfg(); applyChatStyle(); } });
     document.getElementById('pp-text-color')?.addEventListener('input', e => { if (S.activeContact) { getChatStyle(S.activeContact.id).textColor = e.target.value; saveCfg(); applyChatStyle(); } });
 }
+
+S._render.notesRow = renderNotesRow;
+S._render.contactList = renderContactList;
+S._render.thread = renderThread;
+S._render.callLog = renderCallLog;
