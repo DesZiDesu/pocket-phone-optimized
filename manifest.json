@@ -1,9 +1,10 @@
 {
-    "display_name": "Pocket Phone",
-    "loading_order": 50,
-    "version": "0.1.0-stage1",
-    "js": "index.js",
-    "css": "style.css",
-    "author": "you",
-    "homePage": ""
+  "display_name": "Pocket Phone",
+  "loading_order": 50,
+  "version": "0.9.3",
+  "js": "index.js",
+  "css": "style.css",
+  "author": "you",
+  "homePage": "https://github.com/janzanaja188-cyber/pocket-phone",
+  "auto_update": true
 }
