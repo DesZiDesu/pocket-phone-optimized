@@ -24,6 +24,7 @@ export const S = {
     islandTimer: null,
     clockTimer: null,
     userAvatarCache: null,
+    _render: {},
 };
 
 // ── media store ──
@@ -529,3 +530,23 @@ export const APPS = [
     { nav: 'wallet', label: 'Wallet', glow: '#ffc061', icon: ICON.wallet },
     { nav: 'settings', label: 'Settings', glow: '#d0d0d5', icon: ICON.settings },
 ];
+
+export function ppNav(screen) {
+    S.currentScreen = screen;
+    document.getElementById('pp-chat-settings')?.classList.remove('show');
+    document.querySelectorAll('.pp-screen').forEach(s => s.classList.remove('show'));
+    if (screen === 'home') { document.getElementById('pp-home')?.classList.add('show'); return; }
+    const el = document.getElementById('pp-scr-' + screen);
+    if (el) {
+        el.classList.add('show');
+        const R = S._render;
+        if (screen === 'messages') { R.notesRow?.(); R.contactList?.(); }
+        if (screen === 'chat') R.thread?.();
+        if (screen === 'settings') R.phoneSettings?.();
+        if (screen === 'calllog') R.callLog?.();
+    } else {
+        S.currentScreen = 'home';
+        document.getElementById('pp-home')?.classList.add('show');
+        ppToast('เร็ว ๆ นี้: ' + screen);
+    }
+}
