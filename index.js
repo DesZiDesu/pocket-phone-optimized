@@ -1,11 +1,14 @@
-// pocket-phone/index.js — 0.9.7 — ท่อน 1/3 (ต้นไฟล์ → จบ buildPhone)
-// เปลี่ยนจาก 0.9.6: extractSpoken เอาเฉพาะข้อความใน " " (ตัดเครื่องหมาย) + fallback กันเงียบ
-//   · cleanReply/looksLikeThought แข็งขึ้น · fix multiselect กลุ่ม(data-mscid+stopPropagation)
-//   · โน้ต = context ทางเลือก บอทเลือกตอบเอง (logic 2/3) · [ ] = คำสั่งเบื้องหลัง ไม่โชว์
+// pocket-phone/index.js — 0.9.8 — ท่อน 1/3 (ต้นไฟล์ → จบ buildPhone)
+// เปลี่ยนจาก 0.9.7:
+//   + Wallet ครบชุด (walletBalance/walletAccount/walletHistory/botWallets) + helper
+//   + ringtoneUrl (เสียงเรียกเข้าเริ่มต้น) · perchat override เก็บใน chatStyle.ringtone
+//   + transfer message type (โอนผ่านแชท) + ปุ่มโอนในแชท + หน้าจอ Wallet + ไอคอนเงิน
+//   + marker m.edited (ป้าย "แก้ไขแล้ว") · lastMobileDelta (delta-inject บทหลัก)
+//   + group fix / feed stop / post action sheet / swipe → logic อยู่ 2/3 · 3/3
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 3 ท่อนก่อน
 
-const PP_VERSION = '0.9.7';
+const PP_VERSION = '0.9.8';
 const MODULE_NAME = 'pocket-phone';
 
 function ctx() {
@@ -57,6 +60,10 @@ const STORY_BGS = ['linear-gradient(160deg,#5e5ce6,#bf5af2)', 'linear-gradient(1
 const HIST_LIMIT = 50;
 const HIST_PAGE = 50;
 
+// ★ 0.9.8 Wallet: ค่าเริ่มต้นเงินบอทเมื่อยังไม่เคยตั้ง
+const BOT_WALLET_DEFAULT = 30000;
+const CURRENCY = '฿';
+
 const DEFAULTS = {
     theme: 'dark',
     accent: '#0a84ff',
@@ -86,6 +93,14 @@ const DEFAULTS = {
     periods: [],
     groups: [],
     notifCenter: [],
+    // ★ 0.9.8 ใหม่
+    ringtoneUrl: '',          // เสียงเรียกเข้าเริ่มต้น (ลิงก์ · เว้นว่าง=ไม่มีเสียง)
+    walletBalance: 50000,     // ยอดเงินผู้ใช้
+    walletAccount: '',        // เลขบัญชี (สุ่มครั้งแรก)
+    walletName: '',           // ชื่อบัญชี (เว้นว่าง=ชื่อแอป)
+    walletHistory: [],        // {id, dir:'in'|'out', amount, cid, name, note, ts}
+    botWallets: {},           // cid -> ยอดเงินบอท
+    lastMobileDelta: '',      // fingerprint กิจกรรมมือถือครั้งล่าสุดที่ inject บทหลัก
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -110,17 +125,14 @@ function saveCfg() {
 const esc = s => String(s == null ? '' : s)
     .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
 
-// ── ★ 0.9.7 ด่านกรองจุดเดียว ──
+// ── ★ 0.9.7 ด่านกรองจุดเดียว (คงเดิม) ──
 const _THOUGHT_TAGS = 'think|thinking|thought|thoughts|reason|reasoning|reflection|reflect|analysis|analyze|analyzing|plan|planning|planner|strategy|scratchpad|inner[_ ]?monologue|monologue|cot|meta|system|note[_ ]?to[_ ]?self';
 
 function cleanReply(t) {
     let s = String(t || '');
-    // บล็อกแท็ก ทั้งเปิด-ปิด และเปิดค้าง
     s = s.replace(new RegExp(`<(${_THOUGHT_TAGS})[^>]*>[\\s\\S]*?<\\/(?:${_THOUGHT_TAGS})>`, 'gi'), '');
     s = s.replace(new RegExp(`<(${_THOUGHT_TAGS})[^>]*>[\\s\\S]*`, 'gi'), '');
-    // ทั้งบรรทัด TAG: / TAG：
     s = s.replace(new RegExp(`^\\s*(?:${_THOUGHT_TAGS})\\s*[:：].*$`, 'gim'), '');
-    // OOC วงเล็บคู่ + แท็ก html ที่เหลือ
     s = s.replace(/\(\([\s\S]*?\)\)/g, '');
     s = s.replace(/<\/?[a-z][^>]*>/gi, '');
     return s.trim();
@@ -129,22 +141,20 @@ function cleanReply(t) {
 function looksLikeThought(line) {
     const s = String(line || '').trim();
     if (!s) return true;
-    if (/^[\[(].*[\])]$/.test(s) && s.length > 6) return true;     // ทั้งบรรทัดในวงเล็บ
-    if (/^\*.*\*$/.test(s)) return true;                            // *บรรยาย*
+    if (/^[\[(].*[\])]$/.test(s) && s.length > 6) return true;
+    if (/^\*.*\*$/.test(s)) return true;
     if (/^_.+_$/.test(s) && s.length > 8) return true;
     if (new RegExp(`^(?:${_THOUGHT_TAGS})\\b\\s*[:\\-–]`, 'i').test(s)) return true;
     if (/^(?:to (?:my|him|her)self|i think to myself|\(thinks?\b|internally\b)/i.test(s)) return true;
     return false;
 }
 
-// ★ คำสั่งใน [ ] ที่รับรู้ (parse แยกก่อน ไม่โชว์เป็นข้อความ)
-const PP_CMD_RX = /\[(NOTE|VOICE|NOTEREPLY|PP_CALL|PP_MSG|PP_NEWCHAT|LIKES)[^\]]*\][^\n]*/gi;
+// ★ 0.9.8 เพิ่ม PP_PAY / PP_EARN เข้าชุดคำสั่ง [ ] (parse แยก ไม่โชว์)
+const PP_CMD_RX = /\[(NOTE|VOICE|NOTEREPLY|PP_CALL|PP_MSG|PP_NEWCHAT|PP_PAY|PP_EARN|LIKES)[^\]]*\][^\n]*/gi;
 
-// ★ 0.9.7 ดึงเฉพาะข้อความใน " " — ตัดเครื่องหมายออก · ที่เหลือปัดตก
-// รองรับ " " „ « » 「 」 『 』 ' '
 function extractSpoken(raw) {
     let s = String(raw || '');
-    s = s.replace(PP_CMD_RX, '');   // เอาคำสั่งออกก่อน (parse แยกที่อื่น)
+    s = s.replace(PP_CMD_RX, '');
     s = cleanReply(s);
     const out = [];
     const rx = /["“”„«»「」『』]([^"“”„«»「」『』\r\n]{1,})["“”„«»「」『』]/g;
@@ -155,7 +165,6 @@ function extractSpoken(raw) {
     }
     return out;
 }
-// รวม: เอาคำพูดใน " " ก่อน ถ้าไม่มีเลย → fallback กรองรายบรรทัด (กันบอทเงียบ)
 function spokenOrFallback(raw, maxLines) {
     const q = extractSpoken(raw);
     if (q.length) return q.slice(0, maxLines || 3);
@@ -238,7 +247,7 @@ function mainChatRecap(maxLines) {
     return '';
 }
 
-// ── persona ผู้ใช้ ──
+// ── persona ผู้ใช้ (คงเดิม) ──
 function listUserPersonas() {
     const c = ctx();
     try {
@@ -353,6 +362,11 @@ function chatDivider(prevTs, ts) {
     if (d.toDateString() === today.toDateString()) return `วันนี้ ${fmtHM(d)}`;
     return `${TH_DAYS[d.getDay()]} ${d.getDate()} ${TH_MONTHS[d.getMonth()]} · ${fmtHM(d)}`;
 }
+// ★ 0.9.8 ฟอร์แมตเงิน
+function fmtMoney(n) {
+    const v = Math.round(Number(n) || 0);
+    return CURRENCY + v.toLocaleString('en-US');
+}
 let ppClockTimer = null;
 function startClock() {
     if (ppClockTimer) return;
@@ -425,12 +439,12 @@ let ppStoryView = null;
 let ppStoryTimer = null;
 let ppFeedTab = 'feed';
 let ppFeedGenBusy = false;
+let ppFeedGenAbort = false;          // ★ 0.9.8 หยุดเจนในฟีด
 let ppActivePost = null;
 let ppCalMonth = new Date();
 let ppHistShown = HIST_PAGE;
 let ppChatTab = 'char';
 let ppGroupDraft = null;
-let ppNewPostDraft = null;
 
 function ppNav(screen) {
     if (screen === 'stories') screen = 'feed';
@@ -453,6 +467,7 @@ function ppNav(screen) {
         if (screen === 'postview') renderPost();
         if (screen === 'period') renderPeriod();
         if (screen === 'profile') renderProfile();
+        if (screen === 'wallet') renderWallet();        // ★ 0.9.8
     } else {
         ppCurrentScreen = 'home';
         document.getElementById('pp-home')?.classList.add('show');
@@ -550,7 +565,7 @@ function ppReplyComposer(opts) {
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
 }
 
-// ★ 0.9.7 FIX: multiselect — ใช้ data-mscid + stopPropagation กันเด้งไป delegation หลัก (บั๊กกลุ่มวาร์ป)
+// ★ 0.9.7 FIX: multiselect — data-mscid + stopPropagation (คงเดิม)
 function ppMultiSelect(opts) {
     const host = document.getElementById('pp-frame') || document.body;
     const chosen = new Set(opts.selected || []);
@@ -606,6 +621,8 @@ function getChatStyle(id) {
     if (s.personaName === undefined) s.personaName = '';
     if (s.personaDesc === undefined) s.personaDesc = '';
     if (s.userPersonaId === undefined) s.userPersonaId = '';
+    if (s.ringtone === undefined) s.ringtone = '';   // ★ 0.9.8 override เสียงเรียกเข้าต่อแชท
+    if (s.bubbleGlass === undefined) s.bubbleGlass = false; // ★ 0.9.8 ฟองแบบ glass
     return s;
 }
 function pushThreadMsg(id, msg) {
@@ -635,7 +652,41 @@ function getEffectivePersona(id) {
     return getContactPersona(id);
 }
 
-// ── กลุ่ม ──
+// ── ★ 0.9.8 WALLET helpers ──
+function ensureWalletAccount() {
+    const cfg = getCfg();
+    if (!cfg.walletAccount) {
+        cfg.walletAccount = Array.from({ length: 3 }, () => String(Math.floor(1000 + Math.random() * 9000))).join('-');
+        saveCfg();
+    }
+    return cfg.walletAccount;
+}
+function walletName() { const cfg = getCfg(); return (cfg.walletName && cfg.walletName.trim()) || getUserDisplayName(); }
+function getBotWallet(cid) {
+    const cfg = getCfg();
+    if (cfg.botWallets[cid] === undefined) { cfg.botWallets[cid] = BOT_WALLET_DEFAULT; saveCfg(); }
+    return cfg.botWallets[cid];
+}
+function setBotWallet(cid, amount) {
+    const cfg = getCfg();
+    cfg.botWallets[cid] = Math.max(0, Math.round(amount));
+    saveCfg();
+}
+// บันทึกประวัติผู้ใช้ (dir out=จ่ายออก · in=รับเข้า)
+function pushWalletHistory(dir, amount, cid, name, note) {
+    const cfg = getCfg();
+    if (!cfg.walletHistory) cfg.walletHistory = [];
+    cfg.walletHistory.push({ id: newId(), dir, amount: Math.round(amount), cid: cid || null, name: name || '', note: note || '', ts: Date.now() });
+    if (cfg.walletHistory.length > 40) cfg.walletHistory = cfg.walletHistory.slice(-40);
+    saveCfg();
+}
+function adjustUserBalance(delta) {
+    const cfg = getCfg();
+    cfg.walletBalance = Math.max(0, Math.round((cfg.walletBalance || 0) + delta));
+    saveCfg();
+}
+
+// ── กลุ่ม (คงเดิม) ──
 function isGroupId(id) { return typeof id === 'string' && id.startsWith('grp:'); }
 function getGroups() { return getCfg().groups || []; }
 function getGroup(id) { return getGroups().find(g => g.id === id); }
@@ -664,7 +715,7 @@ function setBotNote(cid, text) {
     saveCfg();
 }
 
-// ── สตอรี่ ──
+// ── สตอรี่ (คงเดิม) ──
 function getStories() { return getCfg().stories || []; }
 function liveStories() { const now = Date.now(); return getStories().filter(s => now - (s.ts || 0) < STORY_TTL); }
 function pruneStories() {
@@ -678,14 +729,14 @@ function storyAuthorAvatar(s) { if (s.author === 'user') return ppUserAvatarCach
 function markStorySeen(id) { const cfg = getCfg(); if (!cfg.storySeen) cfg.storySeen = {}; if (!cfg.storySeen[id]) { cfg.storySeen[id] = true; saveCfg(); } }
 function storyHasUnseen(author) { return liveStories().some(s => s.author === author && !(getCfg().storySeen || {})[s.id]); }
 
-// ── Feed ──
+// ── Feed (คงเดิม + NPC ที่มา 0.9.8) ──
 function getFeedPosts() { return getCfg().feedPosts || []; }
 function feedByTab(tab) { const wantNews = tab === 'news'; return getFeedPosts().filter(p => (p.kind === 'news') === wantNews).slice().sort((a, b) => (b.ts || 0) - (a.ts || 0)); }
 function findPost(id) { return getFeedPosts().find(p => p.id === id); }
 function postTotalLikes(p) { return (p.extraLikes || 0) + ((p.likes || []).length); }
 function commentTotalLikes(cm) { return (cm.extraLikes || 0) + ((cm.likes || []).length); }
 function topFeedPosts(n) { return getFeedPosts().filter(p => p.kind !== 'news').slice().sort((a, b) => postTotalLikes(b) - postTotalLikes(a)).slice(0, n || 5); }
-function postAuthorLabel(p) { if (p.author === 'user') return getUserDisplayName(); const c = getContacts().find(x => x.id === p.author); return c ? dname(c) : (p.authorName || 'ระบบ'); }
+function postAuthorLabel(p) { if (p.author === 'user') return getUserDisplayName(); if (p.handle) return p.handle; const c = getContacts().find(x => x.id === p.author); return c ? dname(c) : (p.authorName || 'ระบบ'); }
 function postAuthorAvatar(p) { if (p.author === 'user') return ppUserAvatarCache || ''; const c = getContacts().find(x => x.id === p.author); return c ? (c.avatar || '') : ''; }
 function postResponderPool(p) {
     let pool = getContacts().slice();
@@ -698,8 +749,13 @@ function feedNpcPool() {
     if (getCfg().universeAffectsRP) pool = pool.filter(c => c.id !== currentCharacterId());
     return pool;
 }
+// ★ 0.9.8 ชื่อแอค NPC มีลูกเล่น (เช่น เหมยเองบี๋)
+function makeHandle(name) {
+    const tags = ['เอง', 'บี๋', '_official', 'อ่ะ', 'จ้า', '.x', '_ig', 'ครับผม', 'นะจ๊ะ'];
+    return name + tags[Math.floor(Math.random() * tags.length)];
+}
 
-// ── ประจำเดือน ──
+// ── ประจำเดือน (คงเดิม) ──
 function ymd(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; }
 function getPeriodDays() { return getCfg().periods || []; }
 function isPeriodDay(s) { return getPeriodDays().includes(s); }
@@ -771,6 +827,12 @@ const ICON = {
     users: `<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M16 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-8 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm0 2c-2.7 0-8 1.3-8 4v3h9v-3c0-1 .4-1.9 1-2.6C9.3 13.1 8.6 13 8 13zm8 0c-.6 0-1.3.1-2 .2 1 .8 2 1.9 2 3.8v3h8v-3c0-2.7-5.3-4-8-4z"/></svg>`,
     share: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 16a3 3 0 0 0-2.4 1.2l-7-4a3 3 0 0 0 0-2.4l7-4A3 3 0 1 0 15 5l-7 4a3 3 0 1 0 0 6l7 4A3 3 0 1 0 18 16z"/></svg>`,
     goto: `<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M14 4l-1.4 1.4L16.2 9H4v2h12.2l-3.6 3.6L14 16l6-6z"/></svg>`,
+    // ★ 0.9.8 icons
+    money: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 1a11 11 0 1 0 0 22 11 11 0 0 0 0-22zm.9 16.2v1.3h-1.7v-1.3c-1.6-.2-2.8-1-3-2.6h1.9c.1.7.7 1.2 1.9 1.2 1.1 0 1.7-.5 1.7-1.2 0-.6-.4-1-1.9-1.4-2-.5-3.3-1.1-3.3-2.9 0-1.4 1.1-2.3 2.7-2.6V6.4h1.7v1.3c1.6.3 2.5 1.3 2.6 2.6h-1.9c-.1-.7-.5-1.2-1.6-1.2s-1.6.5-1.6 1.1c0 .6.5.9 1.9 1.3 2 .5 3.3 1.2 3.3 3 0 1.4-1 2.4-2.9 2.7z"/></svg>`,
+    transfer: `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M7 6h11l-2.5-2.5L17 2l5 5-5 5-1.5-1.5L18 8H7V6zm10 12H6l2.5 2.5L7 22l-5-5 5-5 1.5 1.5L6 16h11v2z"/></svg>`,
+    arrowIn: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 3v12.2l4.6-4.6L18 12l-6 6-6-6 1.4-1.4L12 15.2V3z"/></svg>`,
+    arrowOut: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 21V8.8L7.4 13.4 6 12l6-6 6 6-1.4 1.4L12 8.8V21z"/></svg>`,
+    bell: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M12 22a2.5 2.5 0 0 0 2.45-2h-4.9A2.5 2.5 0 0 0 12 22zm7-6v-5a7 7 0 0 0-5-6.7V4a2 2 0 0 0-4 0v.3A7 7 0 0 0 5 11v5l-2 2v1h18v-1l-2-2z"/></svg>`,
 };
 
 const APPS = [
@@ -894,7 +956,7 @@ function buildPhone() {
         </div>
         <div class="pp-msgs" id="pp-msgs"></div>
         <div class="pp-inputbar">
-          <button class="pp-img-btn" id="pp-img-btn" title="ส่งรูป">${ICON.camera}</button>
+          <button class="pp-img-btn" id="pp-attach-btn" title="แนบ">${ICON.plus}</button>
           <textarea class="pp-input" id="pp-input" rows="1" placeholder="ข้อความ"></textarea>
           <button class="pp-gen" id="pp-gen" title="ให้บอทตอบ">${ICON.generate}</button>
           <button class="pp-gen pp-stop" id="pp-stop" title="หยุด" style="display:none">${ICON.stop}</button>
@@ -926,6 +988,11 @@ function buildPhone() {
           <div class="pp-set-label" style="display:flex;align-items:center;gap:8px">Persona ของฉันที่บอทอ่าน <button class="pp-help-btn" id="pp-help-userpersona">?</button></div>
           <div id="pp-cs-userpersona-hint" style="font-size:12px;color:var(--pp-txt3);margin:0 4px 8px"></div>
           <div class="pp-user-persona-list" id="pp-user-persona-list"></div>
+          <div class="pp-set-label">เสียงเรียกเข้าของแชทนี้</div>
+          <div class="pp-cs-color-row">
+            <input id="pp-cs-ringtone" placeholder="ลิงก์เสียง (เว้นว่าง=ใช้ค่าเริ่มต้น)" style="flex:1;background:var(--pp-bg3);border:none;border-radius:14px;padding:10px 14px;color:var(--pp-txt);font-size:13px;min-width:120px">
+            <button id="pp-cs-ringtone-save" class="pp-cs-btn">บันทึก</button>
+          </div>
           <div class="pp-set-label">อื่น ๆ</div>
           <div class="pp-set-group">
             <div class="pp-set-row"><span>ทำเป็น NPC (หมวด NPC)</span><label class="pp-switch"><input type="checkbox" id="pp-npc-toggle"><span></span></label></div>
@@ -938,6 +1005,9 @@ function buildPhone() {
           <div class="pp-cs-color-row">
             <label class="pp-color-wrap"><input type="color" id="pp-bubble-color" value="#0a84ff"><span>พื้นฟอง</span></label>
             <label class="pp-color-wrap"><input type="color" id="pp-text-color" value="#ffffff"><span>สีตัวอักษร</span></label>
+          </div>
+          <div class="pp-set-group" style="margin-top:8px">
+            <div class="pp-set-row"><span>ฟองแบบกระจก (glass)</span><label class="pp-switch"><input type="checkbox" id="pp-bubble-glass"><span></span></label></div>
           </div>
           <div class="pp-cs-color-row" style="margin-top:8px">
             <label class="pp-cs-upload">${ICON.upload} ใช้รูปเป็นพื้นฟอง<input type="file" id="pp-bubbleimg-file" accept="image/*" hidden></label>
@@ -955,6 +1025,7 @@ function buildPhone() {
           <div class="pp-chat-tools">
             <button class="pp-nav-action" id="pp-feed-search-btn" title="ยอดนิยม">${ICON.search}</button>
             <button class="pp-nav-action" id="pp-feed-gen-btn" title="ให้บอทเคลื่อนไหว">${ICON.generate}</button>
+            <button class="pp-nav-action pp-stop" id="pp-feed-stop-btn" title="หยุด" style="display:none">${ICON.stop}</button>
           </div>
         </div>
         <div class="pp-feed-tabs">
@@ -1009,7 +1080,10 @@ function buildPhone() {
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="feed">${ICON.back}</button>
           <span class="pp-nav-title">โพสต์</span>
-          <button class="pp-nav-action" id="pp-post-gen-btn" title="ให้บอทคอมเมนต์/ตอบ">${ICON.generate}</button>
+          <div class="pp-chat-tools">
+            <button class="pp-nav-action" id="pp-post-gen-btn" title="ให้บอทคอมเมนต์/ตอบ">${ICON.generate}</button>
+            <button class="pp-nav-action pp-stop" id="pp-post-stop-btn" title="หยุด" style="display:none">${ICON.stop}</button>
+          </div>
         </div>
         <div class="pp-post-body" id="pp-post-body"></div>
         <div class="pp-inputbar">
@@ -1036,6 +1110,16 @@ function buildPhone() {
           <div class="pp-cal-grid" id="pp-cal-grid"></div>
           <div class="pp-period-hint">แตะวันเพื่อทำเครื่องหมายว่าเป็นวันที่ประจำเดือนมา · หนุ่ม ๆ ในแอปจะรับรู้และใส่ใจ</div>
         </div>
+        <div class="pp-home-bar"></div>
+      </div>
+
+      <div class="pp-screen" id="pp-scr-wallet">
+        <div class="pp-nav">
+          <button class="pp-nav-back" data-nav="home">${ICON.back}</button>
+          <span class="pp-nav-title">Wallet</span>
+          <button class="pp-nav-action" id="pp-wallet-menu" title="ปรับยอด">${ICON.menu}</button>
+        </div>
+        <div class="pp-wallet-body" id="pp-wallet-body"></div>
         <div class="pp-home-bar"></div>
       </div>
 
@@ -1076,6 +1160,9 @@ function buildPhone() {
               <label class="pp-switch"><input type="checkbox" id="pp-set-botcall"><span></span></label>
             </div>
           </div>
+          <div class="pp-set-label">เสียงเรียกเข้า (ค่าเริ่มต้น)</div>
+          <div class="pp-set-group"><div class="pp-set-row" style="gap:10px"><span style="flex-shrink:0">ลิงก์เสียง</span>
+            <input id="pp-set-ringtone" placeholder="วางลิงก์ mp3/ogg (เว้นว่าง=ไม่มีเสียง)" style="flex:1;background:transparent;border:none;color:var(--pp-txt);font-size:13px;text-align:right;min-width:0"></div></div>
           <div class="pp-set-label">ส่งรูป</div>
           <div class="pp-set-group">
             <div class="pp-set-row">
@@ -1163,6 +1250,7 @@ function buildPhone() {
             <button class="pp-ans-btn accept" id="pp-call-accept">${ICON.phone}<span>รับสาย</span></button>
           </div>
         </div>
+        <audio id="pp-ringtone-audio" loop preload="none"></audio>
       </div>
 
       <div class="pp-screen" id="pp-scr-callend">
@@ -1207,11 +1295,19 @@ function buildPhone() {
 </dialog>`;
 }
 
-// pocket-phone/index.js — 0.9.7 — ท่อน 2/3 (renderNotesRow → ppGroupGenerate)
+// pocket-phone/index.js — 0.9.8 — ท่อน 2/3 (renderNotesRow → ppGroupGenerate)
 // ต่อจากท่อน 1/3 ที่จบตรง buildPhone()
+// เปลี่ยนจาก 0.9.7:
+//   + msgPreview/browHTML/renderThread รองรับ type 'transfer' + ป้าย m.edited
+//   + ppMsgActions เพิ่ม "แชร์ไปหาบอทอื่น" · ppEditMsg ตั้ง m.edited
+//   + renderWallet + ppWalletMenu + ppTransferComposer + accept/decline โอน
+//   + ppAttachMenu (รูป/โอนเงิน) · ppShareMsgToBot
+//   + ppFeedGenerate/ppPostGenerate: abort + stop button + NPC handle
+//   + ppGroupGenerate: try/catch + retry ต่อสมาชิก (คนเดียวพลาดไม่ล้มทั้งลูป)
+//   + parse [PP_PAY]/[PP_EARN] ใน ppGenerateReply
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 3 ท่อนก่อน
 
-// ── notes row ──
+// ── notes row (คงเดิม) ──
 function renderNotesRow() {
     const row = document.getElementById('pp-notes-row');
     if (!row) return;
@@ -1275,6 +1371,7 @@ function ppOpenBotNote(cid) {
 function msgPreview(m) {
     if (!m) return 'แตะเพื่อเริ่มแชท';
     if (m.type === 'call') return m.dir === 'out' ? 'โทรออก' : 'สายเข้า';
+    if (m.type === 'transfer') return (m.from === 'me' ? 'โอนเงิน ' : 'ได้รับโอน ') + fmtMoney(m.amount);
     if (m.type === 'image') return m.caption ? `[รูป] ${m.caption}` : '[รูปภาพ]';
     if (m.type === 'voice') return '(ข้อความเสียง)';
     if (m.type === 'sharedpost') return '[แชร์โพสต์]';
@@ -1282,7 +1379,7 @@ function msgPreview(m) {
     return (m.senderName ? m.senderName + ': ' : '') + pre + (m.text || '');
 }
 
-// ── หน้ารายชื่อ (แท็บ + กลุ่มบนสุด) ──
+// ── หน้ารายชื่อ (คงเดิม) ──
 function renderContactList(filter) {
     const list = document.getElementById('pp-contact-list');
     if (!list) return;
@@ -1384,6 +1481,28 @@ function sharedPostCardHTML(m) {
     </div>`;
 }
 
+// ★ 0.9.8 การ์ดโอนเงิน
+function transferBrowHTML(m, idx) {
+    const out = m.from === 'me';
+    const pending = !m.status || m.status === 'pending';
+    const canAct = !out && pending;
+    const statusLine = m.status === 'accepted' ? 'รับเงินแล้ว'
+        : m.status === 'declined' ? 'ปฏิเสธแล้ว'
+        : (out ? 'รอผู้รับเปิด' : 'แตะรับเงินด้านล่าง');
+    return `<div class="pp-brow ${out ? 'out' : 'in'}" data-from="${out ? 'me' : 'them'}"${m.mid ? ` data-mid="${esc(m.mid)}"` : ''}>
+        <div class="pp-transfer ${out ? 'out' : 'in'}${m.status === 'declined' ? ' declined' : ''}" data-msgidx="${idx}">
+            <div class="pp-transfer-top">${ICON.transfer}<span>${out ? 'โอนเงิน' : 'ได้รับโอน'}</span></div>
+            <div class="pp-transfer-amt">${esc(fmtMoney(m.amount))}</div>
+            ${m.note ? `<div class="pp-transfer-note">${esc(m.note)}</div>` : ''}
+            <div class="pp-transfer-status">${esc(statusLine)}</div>
+            ${canAct ? `<div class="pp-transfer-acts">
+                <button class="pp-transfer-decline" data-transdec="${idx}">ปฏิเสธ</button>
+                <button class="pp-transfer-accept" data-transacc="${idx}">รับเงิน</button>
+            </div>` : ''}
+        </div>
+    </div>`;
+}
+
 function browHTML(m, idx, grouped, tail, groupMode) {
     if (m.type === 'call') {
         const out = m.dir === 'out', missed = !!m.missed;
@@ -1394,6 +1513,8 @@ function browHTML(m, idx, grouped, tail, groupMode) {
             </div>
         </div>`;
     }
+    if (m.type === 'transfer') return transferBrowHTML(m, idx);
+
     const out = m.from === 'me';
     const rh = replyHeaderHTML(m.replyTo);
     let inner, extraClass = '';
@@ -1420,11 +1541,14 @@ function browHTML(m, idx, grouped, tail, groupMode) {
             ? `<span class="pp-grp-msg-av">${sc ? contactAvatarHTML(sc, 28) : `<span class="pp-avatar pp-avatar-fb" style="width:28px;height:28px">${esc((m.senderName || '?')[0])}</span>`}</span>`
             : `<span class="pp-grp-msg-av empty"></span>`;
     }
+    // ★ 0.9.8 ป้าย "แก้ไขแล้ว"
+    const editedTag = (m.edited && m.type !== 'sharedpost') ? `<div class="pp-edited-tag">แก้ไขแล้ว</div>` : '';
     return `<div class="pp-brow ${out ? 'out' : 'in'}${grouped ? ' grp' : ''}${groupMode && !out ? ' grpmode' : ''}" data-from="${m.from}"${m.mid ? ` data-mid="${esc(m.mid)}"` : ''}>
         ${avatarCol}
         <div class="pp-brow-col">
             ${senderTag}
             <div class="pp-bubble${tail ? ' tail' : ''}${extraClass}" data-msgidx="${idx}">${rh}${inner}</div>
+            ${editedTag}
         </div>
     </div>`;
 }
@@ -1446,7 +1570,7 @@ function renderThread() {
     const th = getThread(tid);
     const total = th.length;
     if (!total) {
-        msgs.innerHTML = `<div class="pp-sys">${isGroup ? 'เริ่มคุยในกลุ่ม · กดปุ่มฟ้าให้สมาชิกตอบ' : 'เริ่มบทสนทนา · แตะฟองเพื่อแก้ไข/ลบ'}</div>`;
+        msgs.innerHTML = `<div class="pp-sys">${isGroup ? 'เริ่มคุยในกลุ่ม · กดปุ่มฟ้าให้สมาชิกตอบ' : 'เริ่มบทสนทนา · แตะฟองเพื่อจัดการ · ปัดเพื่อตอบ'}</div>`;
     } else {
         const startIdx = Math.max(0, total - ppHistShown);
         let html = '';
@@ -1458,19 +1582,21 @@ function renderThread() {
             firstShown = false;
             if (div) html += `<div class="pp-time-divider">${esc(div)}</div>`;
             prevTs = m.ts || prevTs;
-            if (m.type === 'call') { html += browHTML(m, i, false, true, isGroup); return; }
+            if (m.type === 'call' || m.type === 'transfer') { html += browHTML(m, i, false, true, isGroup); return; }
             const prev = (i - 1 >= startIdx) ? th[i - 1] : null;
             const next = th[i + 1];
             const curKey = m.from === 'me' ? 'me' : (isGroup ? (m.sender || 'them') : 'them');
             const prevKey = prev ? (prev.from === 'me' ? 'me' : (isGroup ? (prev.sender || 'them') : 'them')) : null;
             const nextKey = next ? (next.from === 'me' ? 'me' : (isGroup ? (next.sender || 'them') : 'them')) : null;
-            const grouped = prev && prevKey === curKey && prev.type !== 'call' && !m.replyTo && !div;
-            const tail = !next || nextKey !== curKey || next.type === 'call';
+            const noGroupPrev = prev && (prev.type === 'call' || prev.type === 'transfer');
+            const noGroupNext = next && (next.type === 'call' || next.type === 'transfer');
+            const grouped = prev && prevKey === curKey && !noGroupPrev && !m.replyTo && !div && !m.edited;
+            const tail = !next || nextKey !== curKey || noGroupNext;
             html += browHTML(m, i, grouped, tail, isGroup);
         });
         if (ppGeneratingId !== tid && !isGroup) {
             const last = th[total - 1];
-            if (last && last.from === 'them' && last.type !== 'call') {
+            if (last && last.from === 'them' && last.type !== 'call' && last.type !== 'transfer') {
                 html += `<div class="pp-regen-row" id="pp-regen-row"><button id="pp-regen-btn" class="pp-regen">${ICON.regen}รีเจน</button></div>`;
             }
         }
@@ -1504,15 +1630,22 @@ function ppWarpTo(mid) {
     setTimeout(() => el.classList.remove('pp-warp-hl'), 1600);
 }
 
+// ★ 0.9.8 action sheet ครบ: ตอบ / แก้ไข / แชร์ไปหาบอทอื่น / ลบ
 function ppMsgActions(idx) {
     const tid = ppActiveGroup ? ppActiveGroup.id : (ppActiveContact ? ppActiveContact.id : null);
     if (!tid) return;
     const m = getThread(tid)[idx];
     if (!m) return;
     const items = [];
-    if (m.type !== 'call' && m.type !== 'sharedpost') {
+    if (m.type === 'transfer') {
+        items.push({ label: 'ลบ', danger: true, onClick: () => ppDeleteMsg(idx) });
+        ppActionSheet(items);
+        return;
+    }
+    if (m.type !== 'call') {
         if (m.mid) items.push({ label: 'ตอบข้อความนี้', onClick: () => ppReplyToMsg(idx) });
-        items.push({ label: m.type === 'image' ? 'แก้ไขคำบรรยาย' : (m.type === 'voice' ? 'แก้ไขคำพูด' : 'แก้ไขข้อความ'), onClick: () => ppEditMsg(idx) });
+        if (m.type !== 'sharedpost') items.push({ label: m.type === 'image' ? 'แก้ไขคำบรรยาย' : (m.type === 'voice' ? 'แก้ไขคำพูด' : 'แก้ไขข้อความ'), onClick: () => ppEditMsg(idx) });
+        items.push({ label: 'แชร์ไปหาบอทอื่น', onClick: () => ppShareMsgToBot(idx) });
     }
     items.push({ label: 'ลบ', danger: true, onClick: () => ppDeleteMsg(idx) });
     ppActionSheet(items);
@@ -1523,7 +1656,7 @@ function ppReplyToMsg(idx) {
     const m = getThread(tid)[idx];
     if (!m || !m.mid) return;
     const author = m.from === 'me' ? getUserDisplayName() : (m.senderName || (ppActiveContact ? dname(ppActiveContact) : '?'));
-    const quoted = m.type === 'image' ? (m.caption || '[รูป]') : (m.text || '');
+    const quoted = m.type === 'image' ? (m.caption || '[รูป]') : (m.type === 'transfer' ? ('โอนเงิน ' + fmtMoney(m.amount)) : (m.text || ''));
     ppReplyComposer({
         title: 'ตอบข้อความ', quotedLabel: author, quoted,
         onOk: (text) => { pushThreadMsg(tid, { from: 'me', text, replyTo: { kind: 'msg', text: quoted, author, targetMid: m.mid } }); renderThread(); renderContactList(); }
@@ -1533,10 +1666,31 @@ function ppEditMsg(idx) {
     const tid = ppActiveGroup ? ppActiveGroup.id : (ppActiveContact ? ppActiveContact.id : null);
     if (!tid) return;
     const m = getThread(tid)[idx];
-    if (!m || m.type === 'call') return;
+    if (!m || m.type === 'call' || m.type === 'transfer' || m.type === 'sharedpost') return;
     const cur = m.type === 'image' ? (m.caption || '') : (m.text || '');
     const title = m.type === 'image' ? 'แก้ไขคำบรรยายรูป' : (m.type === 'voice' ? 'แก้ไขคำพูด' : 'แก้ไขข้อความ');
-    ppPrompt(title, cur, v => { if (m.type === 'image') m.caption = v; else m.text = v; saveCfg(); renderThread(); renderContactList(); ppToast('แก้ไขแล้ว'); });
+    ppPrompt(title, cur, v => {
+        if (m.type === 'image') m.caption = v; else m.text = v;
+        m.edited = true;              // ★ ป้ายแก้ไขแล้ว
+        saveCfg(); renderThread(); renderContactList(); ppToast('แก้ไขแล้ว');
+    });
+}
+// ★ 0.9.8 แชร์ข้อความไปหาบอทอื่น (ส่งเป็นข้อความอ้างอิง)
+function ppShareMsgToBot(idx) {
+    const tid = ppActiveGroup ? ppActiveGroup.id : (ppActiveContact ? ppActiveContact.id : null);
+    if (!tid) return;
+    const m = getThread(tid)[idx];
+    if (!m) return;
+    const srcName = m.from === 'me' ? getUserDisplayName() : (m.senderName || (ppActiveContact ? dname(ppActiveContact) : '?'));
+    const quoted = m.type === 'image' ? (m.caption || '[รูป]') : (m.type === 'voice' ? m.text : (m.text || ''));
+    const targets = getContacts().filter(x => x.id !== tid);
+    if (!targets.length) { ppToast('ยังไม่มีคอนแทกต์อื่นให้แชร์'); return; }
+    ppActionSheet(targets.slice(0, 8).map(c => ({
+        label: `ส่งให้ ${dname(c)}`, onClick: () => {
+            pushThreadMsg(c.id, { from: 'me', text: `(แชร์จาก ${srcName}) ${quoted}` });
+            ppActiveContact = c; ppActiveGroup = null; ppNav('chat'); ppToast('แชร์แล้ว');
+        }
+    })));
 }
 
 function ppPlayVoice(idx) {
@@ -1593,6 +1747,7 @@ async function applyChatStyle() {
     if (scr) {
         scr.style.setProperty('--pp-mybub', st.bubble || getCfg().accent || '#0a84ff');
         scr.style.setProperty('--pp-mytext', st.textColor || '#ffffff');
+        scr.classList.toggle('bub-glass', !!st.bubbleGlass);   // ★ ฟองกระจก
         if (st.bubbleImg) {
             const img = await loadMedia('bubbleimg-' + tid);
             if (img) { scr.style.setProperty('--pp-bubimg', `url(${img})`); scr.classList.add('has-bubimg'); } else scr.classList.remove('has-bubimg');
@@ -1610,9 +1765,11 @@ function renderChatSettings() {
     const st = getChatStyle(c.id);
     const pn = document.getElementById('pp-persona-name'); if (pn) pn.value = st.personaName || '';
     const pd = document.getElementById('pp-persona-desc'); if (pd) pd.value = st.personaDesc || '';
+    const rt = document.getElementById('pp-cs-ringtone'); if (rt) rt.value = st.ringtone || '';
     const npc = document.getElementById('pp-npc-toggle'); if (npc) npc.checked = !!c.npc;
     const bc = document.getElementById('pp-bubble-color'); if (bc) bc.value = st.bubble || getCfg().accent || '#0a84ff';
     const tc = document.getElementById('pp-text-color'); if (tc) tc.value = st.textColor || '#ffffff';
+    const gl = document.getElementById('pp-bubble-glass'); if (gl) gl.checked = !!st.bubbleGlass;
     buildChatSwatches();
     renderUserPersonaList();
 }
@@ -1643,7 +1800,7 @@ function markChatSwatches() {
     document.querySelectorAll('#pp-chat-bg-swatches .pp-cs-swatch').forEach(b => b.classList.toggle('on', b.dataset.chatbg === st.bg));
 }
 
-// ── กลุ่ม ──
+// ── กลุ่ม (คงเดิม) ──
 function renderGroupEditor() {
     const d = ppGroupDraft || (ppGroupDraft = { id: null, name: '', members: [], knowEachOther: true, cooldownSec: 0, replyMode: 'many', warnNote: '' });
     const title = document.getElementById('pp-groupnew-title'); if (title) title.textContent = d.id ? 'แก้ไขกลุ่ม' : 'สร้างกลุ่ม';
@@ -1724,7 +1881,129 @@ function renderProfile() {
     const nt = document.getElementById('pp-profile-note-txt'); if (nt) { const un = getUserNote(); nt.textContent = un ? un.text : '—'; }
 }
 
-// ── AI บรรยายภาพ + Island ──
+// ── ★ 0.9.8 WALLET UI ──
+function renderWallet() {
+    ensureWalletAccount();
+    const cfg = getCfg();
+    const body = document.getElementById('pp-wallet-body');
+    if (!body) return;
+    const hist = (cfg.walletHistory || []).slice().reverse();
+    const histHTML = hist.length ? hist.map(h => {
+        const inn = h.dir === 'in';
+        return `<div class="pp-wallet-hrow">
+            <span class="pp-wallet-hic ${inn ? 'in' : 'out'}">${inn ? ICON.arrowIn : ICON.arrowOut}</span>
+            <div class="pp-wallet-hmeta">
+                <div class="pp-wallet-hname">${esc(h.name || (inn ? 'รับเข้า' : 'จ่ายออก'))}</div>
+                <div class="pp-wallet-hsub">${esc(h.note || '')}${h.note ? ' · ' : ''}${esc(fmtListTime(h.ts))}</div>
+            </div>
+            <span class="pp-wallet-hamt ${inn ? 'in' : 'out'}">${inn ? '+' : '-'}${esc(fmtMoney(h.amount))}</span>
+        </div>`;
+    }).join('') : `<div class="pp-empty" style="padding:30px 24px">ยังไม่มีรายการ</div>`;
+    body.innerHTML = `
+        <div class="pp-wallet-card">
+            <div class="pp-wallet-card-top">
+                <span class="pp-wallet-card-label">Pocket Wallet</span>
+                ${ICON.money}
+            </div>
+            <div class="pp-wallet-card-bal">${esc(fmtMoney(cfg.walletBalance))}</div>
+            <div class="pp-wallet-card-foot">
+                <span>${esc(walletName())}</span>
+                <span class="pp-wallet-card-acc">${esc(cfg.walletAccount)}</span>
+            </div>
+        </div>
+        <div class="pp-wallet-actions">
+            <button class="pp-wallet-act" id="pp-wallet-transfer">${ICON.transfer}<span>โอนให้คนคุย</span></button>
+            <button class="pp-wallet-act" id="pp-wallet-name">${ICON.settings}<span>แก้ชื่อ/บัญชี</span></button>
+        </div>
+        <div class="pp-set-label">รายการล่าสุด</div>
+        <div class="pp-wallet-hist">${histHTML}</div>
+        <div style="height:24px"></div>`;
+    body.querySelector('#pp-wallet-transfer')?.addEventListener('click', () => {
+        const targets = getContacts();
+        if (!targets.length) { ppToast('ยังไม่มีคนคุยให้โอน'); return; }
+        ppActionSheet(targets.slice(0, 10).map(c => ({ label: `โอนให้ ${dname(c)}`, onClick: () => ppTransferComposer(c.id) })));
+    });
+    body.querySelector('#pp-wallet-name')?.addEventListener('click', ppWalletEditName);
+}
+function ppWalletEditName() {
+    ppPrompt('ชื่อบัญชี (เว้นว่าง=ชื่อแอป)', getCfg().walletName || '', v => {
+        getCfg().walletName = v; saveCfg(); renderWallet(); ppToast('บันทึกแล้ว');
+    });
+}
+function ppWalletMenu() {
+    ppActionSheet([
+        { label: 'เติมยอด (+)', onClick: () => ppPrompt('เติมเท่าไหร่', '', v => { const n = Math.abs(parseInt(v.replace(/[^\d]/g, ''), 10) || 0); if (n) { adjustUserBalance(n); pushWalletHistory('in', n, null, 'ปรับยอดเอง', 'เติมเงิน'); renderWallet(); ppToast(`+${fmtMoney(n)}`); } }) },
+        { label: 'หักยอด (−)', onClick: () => ppPrompt('หักเท่าไหร่', '', v => { const n = Math.abs(parseInt(v.replace(/[^\d]/g, ''), 10) || 0); if (n) { adjustUserBalance(-n); pushWalletHistory('out', n, null, 'ปรับยอดเอง', 'หักเงิน'); renderWallet(); ppToast(`-${fmtMoney(n)}`); } }) },
+        { label: 'แก้ชื่อ/บัญชี', onClick: ppWalletEditName },
+    ]);
+}
+// composer โอนเงิน: ยอด + โน้ต
+function ppTransferComposer(cid) {
+    const c = getContacts().find(x => x.id === cid);
+    if (!c) return;
+    const cfg = getCfg();
+    const host = document.getElementById('pp-frame') || document.body;
+    const ov = document.createElement('div');
+    ov.className = 'pp-help-ov';
+    ov.style.cssText = 'position:absolute;inset:0;z-index:9600;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);';
+    ov.innerHTML = `<div style="background:rgba(44,44,48,.98);backdrop-filter:blur(30px);border-radius:20px 20px 0 0;width:100%;max-width:393px;padding:18px 18px calc(18px + env(safe-area-inset-bottom));box-shadow:0 -12px 40px rgba(0,0,0,.5)">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">${contactAvatarHTML(c, 40)}<div><div style="font-size:15px;font-weight:700;color:#fff">โอนให้ ${esc(dname(c))}</div><div style="font-size:12px;color:rgba(235,235,245,.6)">ยอดของคุณ ${esc(fmtMoney(cfg.walletBalance))}</div></div></div>
+        <input class="pp-trans-amt" inputmode="numeric" placeholder="จำนวนเงิน" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,.3);border:none;border-radius:14px;padding:14px;color:#fff;font-size:22px;font-weight:700;text-align:center;margin-bottom:10px">
+        <input class="pp-trans-note" placeholder="โน้ต (ไม่บังคับ)" style="width:100%;box-sizing:border-box;background:rgba(0,0,0,.3);border:none;border-radius:14px;padding:11px 14px;color:#fff;font-size:15px;margin-bottom:14px">
+        <div style="display:flex;gap:8px">
+            <button class="pp-trans-cancel" style="flex:1;background:rgba(120,120,128,.3);border:none;color:#fff;border-radius:14px;padding:13px;font-size:15px;cursor:pointer">ยกเลิก</button>
+            <button class="pp-trans-ok" style="flex:1;background:var(--pp-accent,#0a84ff);border:none;color:#fff;border-radius:14px;padding:13px;font-size:15px;font-weight:600;cursor:pointer">โอนเลย</button>
+        </div>
+    </div>`;
+    host.appendChild(ov);
+    const amtEl = ov.querySelector('.pp-trans-amt');
+    const noteEl = ov.querySelector('.pp-trans-note');
+    setTimeout(() => amtEl?.focus(), 60);
+    const close = () => ov.remove();
+    ov.querySelector('.pp-trans-cancel')?.addEventListener('click', close);
+    ov.querySelector('.pp-trans-ok')?.addEventListener('click', () => {
+        const amount = Math.abs(parseInt(String(amtEl.value).replace(/[^\d]/g, ''), 10) || 0);
+        const note = (noteEl.value || '').trim();
+        if (!amount) { ppToast('ใส่จำนวนเงิน'); return; }
+        if ((getCfg().walletBalance || 0) < amount) { ppToast('ยอดเงินไม่พอ'); return; }
+        adjustUserBalance(-amount);
+        setBotWallet(c.id, getBotWallet(c.id) + amount);
+        pushWalletHistory('out', amount, c.id, dname(c), note);
+        pushThreadMsg(c.id, { from: 'me', type: 'transfer', amount, note, status: 'accepted' });
+        close();
+        ppActiveContact = c; ppActiveGroup = null;
+        if (ppCurrentScreen !== 'chat') ppNav('chat'); else renderThread();
+        renderContactList(); ppToast(`โอน ${fmtMoney(amount)} แล้ว`);
+    });
+    ov.addEventListener('click', e => { if (e.target === ov) close(); });
+}
+function ppAcceptTransfer(idx) {
+    const c = ppActiveContact; if (!c) return;
+    const m = getThread(c.id)[idx];
+    if (!m || m.type !== 'transfer' || m.from !== 'them') return;
+    if (m.status && m.status !== 'pending') return;
+    m.status = 'accepted';
+    adjustUserBalance(m.amount);
+    setBotWallet(c.id, getBotWallet(c.id) - m.amount);
+    pushWalletHistory('in', m.amount, c.id, dname(c), m.note);
+    saveCfg(); renderThread(); renderContactList(); ppToast(`รับ ${fmtMoney(m.amount)} แล้ว`);
+}
+function ppDeclineTransfer(idx) {
+    const c = ppActiveContact; if (!c) return;
+    const m = getThread(c.id)[idx];
+    if (!m || m.type !== 'transfer' || m.from !== 'them') return;
+    if (m.status && m.status !== 'pending') return;
+    m.status = 'declined';
+    saveCfg(); renderThread(); ppToast('ปฏิเสธการโอนแล้ว');
+}
+// เมนูแนบในแชท (รูป / โอนเงิน)
+function ppAttachMenu() {
+    const items = [{ label: 'ส่งรูป', onClick: ppPickChatImage }];
+    if (!ppActiveGroup && ppActiveContact) items.push({ label: 'โอนเงิน', onClick: () => ppTransferComposer(ppActiveContact.id) });
+    ppActionSheet(items);
+}
+
+// ── AI บรรยายภาพ + Island (คงเดิม) ──
 function islandStatus(text) {
     clearTimeout(ppIslandTimer);
     ppIslandState = { cid: '_sys', name: 'Pocket Phone', avatar: '', kind: 'msg', text };
@@ -1740,14 +2019,13 @@ async function captionImageAI(dataUrl) {
     } catch (e) { console.warn('[pocket-phone] captionAI failed', e); }
     return '';
 }
-// ★ 0.9.7 fix: try/finally ยุบ Island ชัวร์ ไม่ค้าง
 async function captionImageAIwithIsland(dataUrl) {
     islandStatus('กำลังสร้างคำบรรยายภาพ…');
     try { return await captionImageAI(dataUrl); }
     finally { islandCollapse(); }
 }
 
-// ── ส่งรูปในแชท (สองทางเลือกเสมอ) ──
+// ── ส่งรูปในแชท (คงเดิม) ──
 function ppPickChatImage() { document.getElementById('pp-chat-img-file')?.click(); }
 async function ppHandleChatImage(file) {
     const tid = ppActiveGroup ? ppActiveGroup.id : (ppActiveContact ? ppActiveContact.id : null);
@@ -1768,7 +2046,7 @@ async function ppHandleChatImage(file) {
     r.readAsDataURL(file);
 }
 
-// ── สตอรี่ ──
+// ── สตอรี่ (คงเดิม) ──
 function renderStoryTray() {
     pruneStories();
     const tray = document.getElementById('pp-story-tray');
@@ -1909,8 +2187,8 @@ function showStoryViewers(s) {
     ppHelpPopup('ผู้ชมสตอรี่', names.length ? names.map(esc).join('<br>') : 'ยังไม่มีใครดู');
 }
 
-// ── Feed render ──
-function commentAuthorLabel(cm) { if (cm.author === 'user') return getUserDisplayName(); const c = getContacts().find(x => x.id === cm.author); return c ? dname(c) : (cm.authorName || '?'); }
+// ── Feed render (คงเดิม) ──
+function commentAuthorLabel(cm) { if (cm.author === 'user') return getUserDisplayName(); if (cm.handle) return cm.handle; const c = getContacts().find(x => x.id === cm.author); return c ? dname(c) : (cm.authorName || '?'); }
 function commentAuthorAvatar(cm) { if (cm.author === 'user') return ppUserAvatarCache || ''; const c = getContacts().find(x => x.id === cm.author); return c ? (c.avatar || '') : ''; }
 function hydrateFeedImages() {
     document.querySelectorAll('.pp-post-img[data-postimg]').forEach(el => { const p = findPost(el.dataset.postimg); if (p && p.mediaKey) loadMedia(p.mediaKey).then(img => { if (img) el.style.backgroundImage = `url(${img})`; }); });
@@ -1976,9 +2254,9 @@ function renderPost() {
         let h = `<div class="pp-cmt${depth ? ' child' : ''}" data-cmtid="${esc(cm.id)}">
             ${cavHTML}
             <div class="pp-cmt-body">
-                <div class="pp-cmt-bubble"><span class="pp-cmt-name">${esc(commentAuthorLabel(cm))}</span>${parentName ? `<span class="pp-cmt-to" data-cmtwarp="${esc(cm.parentId)}">▸ ${esc(parentName)}</span>` : ''}<span class="pp-cmt-txt">${esc(cm.text)}</span></div>
+                <div class="pp-cmt-bubble" data-cmtmenu="${esc(cm.id)}"><span class="pp-cmt-name">${esc(commentAuthorLabel(cm))}</span>${parentName ? `<span class="pp-cmt-to" data-cmtwarp="${esc(cm.parentId)}">▸ ${esc(parentName)}</span>` : ''}<span class="pp-cmt-txt">${esc(cm.text)}</span></div>
                 <div class="pp-cmt-meta">
-                    <span>${esc(fmtNoteAge(cm.ts))}</span>
+                    <span>${esc(fmtNoteAge(cm.ts))}${cm.edited ? ' · แก้ไขแล้ว' : ''}</span>
                     <button class="pp-cmt-reply" data-cmtreply="${esc(cm.id)}">ตอบกลับ</button>
                     <button class="pp-cmt-like${cliked ? ' on' : ''}" data-cmtlike="${esc(cm.id)}">${ICON.heart}<span>${commentTotalLikes(cm)}</span></button>
                     <button class="pp-cmt-del" data-cmtdel="${esc(cm.id)}">${ICON.trash}</button>
@@ -1995,7 +2273,7 @@ function renderPost() {
     hydrateFeedImages();
 }
 
-// ── สร้างโพสต์ ──
+// ── สร้างโพสต์ (คงเดิม) ──
 function renderNewPost() {
     const d = ppNewPostDraft || (ppNewPostDraft = { text: '', mediaKey: null, dataUrl: null, caption: '', responders: [], knowEachOther: true });
     const title = document.getElementById('pp-newpost-title'); if (title) title.textContent = ppFeedTab === 'news' ? 'เขียนข่าว' : 'สร้างโพสต์';
@@ -2082,6 +2360,15 @@ function ppReplyComment(cid) {
         onOk: (text) => { p.comments.push({ id: newId(), author: 'user', text, ts: Date.now(), likes: [], extraLikes: 0, parentId: cid }); saveCfg(); renderPost(); }
     });
 }
+// ★ 0.9.8 action sheet ของคอมเมนต์: ตอบ/แก้ไข/ลบ
+function ppCommentActions(cid) {
+    const p = findPost(ppActivePost); if (!p) return;
+    const cm = (p.comments || []).find(x => x.id === cid); if (!cm) return;
+    const items = [{ label: 'ตอบกลับ', onClick: () => ppReplyComment(cid) }];
+    if (cm.author === 'user') items.push({ label: 'แก้ไข', onClick: () => ppPrompt('แก้ไขคอมเมนต์', cm.text, v => { if (v) { cm.text = v; cm.edited = true; saveCfg(); renderPost(); } }) });
+    items.push({ label: 'ลบ', danger: true, onClick: () => ppDeleteComment(cid) });
+    ppActionSheet(items);
+}
 function ppDeleteComment(cid) {
     const p = findPost(ppActivePost); if (!p) return;
     ppActionSheet([{ label: 'ลบคอมเมนต์นี้ (รวมที่ตอบใต้)', danger: true, onClick: () => {
@@ -2122,15 +2409,30 @@ function feedSearchTop5() {
     ppHelpPopup('5 อันดับยอดนิยม', body);
 }
 
-// ── Feed generation ──
+// ── Feed generation (★ 0.9.8 abort + stop + handle) ──
 function feedGenAffectRpBlock() { return getCfg().universeAffectsRP ? mainChatRecap(10) : ''; }
+function showFeedGenControls(active) {
+    const g = document.getElementById('pp-feed-gen-btn'); if (g) g.style.display = active ? 'none' : 'flex';
+    const s = document.getElementById('pp-feed-stop-btn'); if (s) s.style.display = active ? 'flex' : 'none';
+}
+function showPostGenControls(active) {
+    const g = document.getElementById('pp-post-gen-btn'); if (g) g.style.display = active ? 'none' : 'flex';
+    const s = document.getElementById('pp-post-stop-btn'); if (s) s.style.display = active ? 'flex' : 'none';
+}
+function ppStopFeedGen() {
+    ppFeedGenAbort = true;
+    ppGenAbort = true;
+    try { const c = ctx(); if (c && typeof c.stopGeneration === 'function') c.stopGeneration(); } catch {}
+    islandCollapse();
+    showFeedGenControls(false); showPostGenControls(false);
+    ppToast('หยุดแล้ว');
+}
 async function ppFeedGenerate() {
     if (ppFeedGenBusy || ppGeneratingId) return;
     const pool = feedNpcPool();
     if (!pool.length) { ppToast('ยังไม่มีคอนแทกต์ให้โพสต์ (เพิ่มคนคุยก่อน)'); return; }
-    ppFeedGenBusy = true;
-    const genBtn = document.getElementById('pp-feed-gen-btn');
-    if (genBtn) genBtn.disabled = true;
+    ppFeedGenBusy = true; ppFeedGenAbort = false; ppGenAbort = false;
+    showFeedGenControls(true);
     islandStatus('กำลังให้บอทเคลื่อนไหวในฟีด…');
     try {
         const author = pool[Math.floor(Math.random() * pool.length)];
@@ -2149,25 +2451,25 @@ async function ppFeedGenerate() {
             `Reply in the SAME language the user uses (Thai). No emoji. No planning. No narration. Only the quoted post text + the [LIKES] line.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 3);
+        if (ppFeedGenAbort) { ppToast('หยุดแล้ว'); return; }
         const likesM = raw.match(/\[LIKES\]\s*(\d+)/i);
         const extraLikes = likesM ? parseInt(likesM[1], 10) : (Math.floor(Math.random() * 40) + 5);
         const text = spokenOrFallback(raw, 4).join('\n');
         if (text) {
-            getCfg().feedPosts.push({ id: newId(), author: isNews ? 'news' : author.id, kind: isNews ? 'news' : 'post', authorName: isNews ? 'ข่าว' : dname(author), text: text.slice(0, 1000), responders: null, knowEachOther: true, ts: Date.now(), likes: [], extraLikes, comments: [], views: {} });
+            getCfg().feedPosts.push({ id: newId(), author: isNews ? 'news' : author.id, kind: isNews ? 'news' : 'post', authorName: isNews ? 'ข่าว' : dname(author), handle: isNews ? 'ข่าว' : makeHandle(dname(author)), text: text.slice(0, 1000), responders: null, knowEachOther: true, ts: Date.now(), likes: [], extraLikes, comments: [], views: {} });
             saveCfg(); renderFeed(); ppToast('มีโพสต์ใหม่');
             if (!isNews) { pushNotif(author.id, 'feed', `${dname(author)} โพสต์ใหม่`); if (!document.getElementById('pp-dialog')?.open) islandNotify(author, `${dname(author)} โพสต์ใหม่`); }
         } else ppToast('บอทยังไม่โพสต์ ลองใหม่');
     } catch (e) { console.error('[pocket-phone] feed gen', e); ppToast('เชื่อมต่อไม่ได้'); }
-    finally { ppFeedGenBusy = false; islandCollapse(); const b = document.getElementById('pp-feed-gen-btn'); if (b) b.disabled = false; }
+    finally { ppFeedGenBusy = false; ppFeedGenAbort = false; ppGenAbort = false; islandCollapse(); showFeedGenControls(false); }
 }
 async function ppPostGenerate() {
     const p = findPost(ppActivePost);
     if (!p || ppFeedGenBusy) return;
     const pool = postResponderPool(p);
     if (!pool.length) { ppToast('ไม่มีผู้ที่อนุญาตให้ตอบโพสต์นี้'); return; }
-    ppFeedGenBusy = true;
-    const genBtn = document.getElementById('pp-post-gen-btn');
-    if (genBtn) genBtn.disabled = true;
+    ppFeedGenBusy = true; ppFeedGenAbort = false; ppGenAbort = false;
+    showPostGenControls(true);
     islandStatus('กำลังให้บอทคอมเมนต์…');
     try {
         const names = pool.map(c => dname(c));
@@ -2192,6 +2494,7 @@ async function ppPostGenerate() {
             `STRICT: quoted text = only what that character would type. No planning, no narration, no asterisks, no extra tags.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 3);
+        if (ppFeedGenAbort) { ppToast('หยุดแล้ว'); return; }
         const lines = String(raw || '').split(/\n+/).map(l => l.trim()).filter(Boolean);
         let added = 0;
         for (const line of lines) {
@@ -2200,7 +2503,6 @@ async function ppPostGenerate() {
             const authorName = mm[1].trim();
             const likes = parseInt(mm[2] || '0', 10) || 0;
             const targetName = (mm[3] || '').trim();
-            // ดึงเฉพาะใน " " ของส่วน comment · ถ้าไม่มี quote ใช้ทั้งท่อน (fallback)
             const q = extractSpoken(mm[4]);
             let text = (q.length ? q[0] : stripEmoji(cleanReply(mm[4]).replace(/^["'“”‘’„«»「」『』]+|["'“”‘’„«»「」『』]+$/g, '')).trim());
             if (!text || looksLikeThought(text)) continue;
@@ -2210,16 +2512,16 @@ async function ppPostGenerate() {
                 const par = (p.comments || []).slice().reverse().find(cm => commentAuthorLabel(cm) === targetName || targetName.includes(commentAuthorLabel(cm)));
                 if (par) parentId = par.id;
             }
-            p.comments.push({ id: newId(), author: c ? c.id : 'npc', authorName, text, ts: Date.now(), likes: [], extraLikes: likes, parentId });
+            p.comments.push({ id: newId(), author: c ? c.id : 'npc', authorName, handle: c ? makeHandle(dname(c)) : makeHandle(authorName), text, ts: Date.now(), likes: [], extraLikes: likes, parentId });
             added++;
         }
         saveCfg(); renderPost();
         ppToast(added ? `+${added} คอมเมนต์` : 'บอทยังไม่คอมเมนต์ ลองใหม่');
     } catch (e) { console.error('[pocket-phone] post gen', e); ppToast('เชื่อมต่อไม่ได้'); }
-    finally { ppFeedGenBusy = false; islandCollapse(); const b = document.getElementById('pp-post-gen-btn'); if (b) b.disabled = false; }
+    finally { ppFeedGenBusy = false; ppFeedGenAbort = false; ppGenAbort = false; islandCollapse(); showPostGenControls(false); }
 }
 
-// ── ประจำเดือน ──
+// ── ประจำเดือน (คงเดิม) ──
 function renderPeriod() {
     const status = document.getElementById('pp-period-status');
     if (status) {
@@ -2247,7 +2549,7 @@ function renderPeriod() {
 }
 function ppCalNav(delta) { ppCalMonth = new Date(ppCalMonth.getFullYear(), ppCalMonth.getMonth() + delta, 1); renderPeriod(); }
 
-// ── Dynamic Island ──
+// ── Dynamic Island (คงเดิม) ──
 let ppIslandState = null;
 let ppIslandTimer = null;
 function renderIslandInto(el, state) {
@@ -2338,6 +2640,7 @@ function ppDeleteChat(id) {
     delete cfg.threads[id];
     delete cfg.chatStyle[id];
     if (cfg.botNotes) delete cfg.botNotes[id];
+    if (cfg.botWallets) delete cfg.botWallets[id];
     cfg.pinned = (cfg.pinned || []).filter(x => x !== id);
     cfg.callLog = (cfg.callLog || []).filter(l => l.cid !== id);
     (cfg.groups || []).forEach(g => { g.members = (g.members || []).filter(m => m !== id); });
@@ -2360,7 +2663,7 @@ function ppViewing(tid) {
         ((ppActiveGroup && ppActiveGroup.id === tid) || (ppActiveContact && ppActiveContact.id === tid));
 }
 
-// ── หยุดเจน ──
+// ── หยุดเจน (คงเดิม) ──
 function showGenControls(active) {
     const gen = document.getElementById('pp-gen');
     const stop = document.getElementById('pp-stop');
@@ -2374,7 +2677,7 @@ function ppStopGen() {
     hideTyping(); islandCollapse(); showGenControls(false);
 }
 
-// ── generation core ──
+// ── generation core (คงเดิม) ──
 async function genOnce(prompt) {
     const context = ctx();
     if (context && typeof context.generateQuietPrompt === 'function') return await context.generateQuietPrompt(prompt, false, false);
@@ -2385,7 +2688,7 @@ async function genWithRetry(prompt, tries) {
     let lastErr = null;
     const n = tries || 3;
     for (let t = 0; t < n; t++) {
-        if (ppGenAbort) return '';
+        if (ppGenAbort || ppFeedGenAbort) return '';
         try { const raw = await genOnce(prompt); const cleaned = cleanReply(raw); if (cleaned) return raw; }
         catch (e) { lastErr = e; console.warn('[pocket-phone] gen retry', t + 1, e); }
         await new Promise(r => setTimeout(r, 400 * (t + 1)));
@@ -2397,11 +2700,11 @@ async function ppRegenerate() {
     const c = ppActiveContact;
     if (!c || ppGeneratingId || ppActiveGroup) return;
     const th = getThread(c.id);
-    while (th.length && th[th.length - 1].from === 'them' && th[th.length - 1].type !== 'call') th.pop();
+    while (th.length && th[th.length - 1].from === 'them' && th[th.length - 1].type !== 'call' && th[th.length - 1].type !== 'transfer') th.pop();
     saveCfg(); renderThread(); ppGenerateReply();
 }
 
-// ── รวมจักรวาล ──
+// ── รวมจักรวาล (คงเดิม) ──
 function findMentionedContact(text, excludeId) {
     const s = String(text || '');
     const cands = getContacts().filter(c => c.id !== excludeId).map(c => ({ c, names: [c.name, c.customName].filter(Boolean) })).sort((a, b) => Math.max(...b.names.map(n => n.length)) - Math.max(...a.names.map(n => n.length)));
@@ -2415,6 +2718,7 @@ async function universeInterject(interloper) {
         const th = getThread(interloper.id).slice(-6);
         const histTxt = th.map(m => {
             if (m.type === 'call') return `[${m.dir === 'out' ? 'โทรออก' : 'สายเข้า'}]`;
+            if (m.type === 'transfer') return `[โอนเงิน ${fmtMoney(m.amount)}]`;
             if (m.type === 'image') return `[รูป]`;
             if (m.type === 'voice') return `(เสียง) ${m.text}`;
             if (m.type === 'sharedpost') return `[แชร์โพสต์]`;
@@ -2438,7 +2742,7 @@ async function universeInterject(interloper) {
     } catch (e) { console.warn('[pocket-phone] universe interject failed', e); }
 }
 
-// ── ★ เจนแชทเดี่ยว (โน้ต = context ทางเลือก · เอาเฉพาะ " ") ──
+// ── ★ เจนแชทเดี่ยว (+ parse PP_PAY/PP_EARN) ──
 async function ppGenerateReply() {
     if (ppActiveGroup) return ppGroupGenerate();
     const c = ppActiveContact;
@@ -2465,6 +2769,7 @@ async function ppGenerateReply() {
         const th = getThread(c.id).slice(-HIST_LIMIT);
         const histTxt = th.map(m => {
             if (m.type === 'call') return `[${m.dir === 'out' ? `${userName} called ${dname(c)}` : `${dname(c)} called ${userName}`}${m.text ? ': ' + m.text : ''}]`;
+            if (m.type === 'transfer') return `[${m.from === 'me' ? `${userName} transferred ${fmtMoney(m.amount)} to ${dname(c)}` : `${dname(c)} sent ${fmtMoney(m.amount)} to ${userName}`}${m.note ? ' — ' + m.note : ''}${m.status === 'declined' ? ' (declined)' : ''}]`;
             if (m.type === 'image') return `${m.from === 'me' ? userName : dname(c)}: [ส่งรูป${m.caption ? ': ' + m.caption : ''}]`;
             if (m.type === 'voice') return `${m.from === 'me' ? userName : dname(c)}: (ข้อความเสียง) ${m.text}`;
             if (m.type === 'sharedpost') { const p = findPost(m.postId); return `${m.from === 'me' ? userName : dname(c)}: [แชร์โพสต์: ${p ? (p.text || '[รูป]').slice(0, 80) : 'ถูกลบ'}]`; }
@@ -2478,8 +2783,8 @@ async function ppGenerateReply() {
             (up && (up.name || up.desc)) ? `Who you are chatting with (${userName}): ${[up.name ? 'Name: ' + up.name : '', up.desc].filter(Boolean).join(' — ')}` : null,
             rp ? `Ongoing roleplay context (stay consistent):\n${rp}` : null,
             period ? `Important — ${period}` : null,
-            // ★ โน้ต = context ทางเลือก บอทเลือกเอง ไม่บังคับ
             un ? `${userName}'s current status note reads: "${un.text}". You may glance at it. Mention it ONLY if your character would naturally care — otherwise ignore it and just answer their latest message. Do NOT force a reaction.` : null,
+            `Your wallet balance is about ${fmtMoney(getBotWallet(c.id))}. You may send money to ${userName} ONLY if it truly fits (e.g. you owe them, a gift, they asked and you'd agree) by adding a final line exactly: [PP_PAY:amount|short reason]. Never send money unprompted or out of character.`,
             histTxt ? `\n<history>\n${histTxt}\n</history>` : null,
             `\nReply to ${userName}'s LAST message, in character as ${dname(c)}, with 1-3 short chat lines.`,
             `Reply in the SAME language the conversation uses (Thai if Thai).`,
@@ -2493,16 +2798,17 @@ async function ppGenerateReply() {
         let raw = await genWithRetry(prompt, 3);
         if (ppGenAbort) { aborted = true; }
         else {
-            // parse คำสั่ง [ ] ก่อน
             const noteMatch = raw.match(/\[NOTE\]\s*(.+)$/im);
             if (noteMatch) setBotNote(c.id, stripEmoji(noteMatch[1].trim().replace(/["“”„«»「」『』]/g, '')));
+            // ★ 0.9.8 parse PP_PAY (บอทโอนให้ผู้ใช้ → transfer pending) / PP_EARN (ผู้ใช้ได้เงินจากเหตุการณ์)
+            const payM = raw.match(/\[PP_PAY:\s*(\d+)\s*(?:\|\s*([^\]]*))?\]/i);
+            const earnM = raw.match(/\[PP_EARN:\s*(\d+)\s*(?:\|\s*([^\]]*))?\]/i);
             let voiceMsg = null;
             const vMatch = raw.match(/\[VOICE\]\s*(.+)$/im);
             if (vMatch) { const t = stripEmoji(vMatch[1].trim().replace(/["“”„«»「」『']/g, '')); if (t) voiceMsg = { from: 'them', type: 'voice', text: t, dur: Math.min(30, Math.max(2, Math.round(t.length / 8))) }; }
-            // ★ เอาเฉพาะข้อความใน " "
             const lines = spokenOrFallback(raw, 3);
             const hasCall = getCfg().botCallKeyword && ppViewing(c.id) && lines.some(wantsToCall);
-            if (!lines.length && !voiceMsg) failed = true;
+            if (!lines.length && !voiceMsg && !payM && !earnM) failed = true;
             else if (hasCall) botCalls = true;
             else {
                 for (let i = 0; i < lines.length && !ppGenAbort; i++) {
@@ -2513,6 +2819,17 @@ async function ppGenerateReply() {
                     if (ppViewing(c.id)) renderThread();
                 }
                 if (voiceMsg && !ppGenAbort) { await new Promise(r => setTimeout(r, 400)); if (!ppGenAbort) { pushThreadMsg(c.id, voiceMsg); if (ppViewing(c.id)) renderThread(); } }
+                // โอนจากบอท → transfer pending (ผู้ใช้กดรับ)
+                if (payM && !ppGenAbort) {
+                    const amt = Math.abs(parseInt(payM[1], 10) || 0);
+                    const note = (payM[2] || '').trim();
+                    if (amt > 0 && amt <= getBotWallet(c.id)) { pushThreadMsg(c.id, { from: 'them', type: 'transfer', amount: amt, note, status: 'pending' }); if (ppViewing(c.id)) renderThread(); }
+                }
+                if (earnM && !ppGenAbort) {
+                    const amt = Math.abs(parseInt(earnM[1], 10) || 0);
+                    const note = (earnM[2] || '').trim();
+                    if (amt > 0) { adjustUserBalance(amt); pushWalletHistory('in', amt, c.id, dname(c), note || 'รายได้'); pushThreadMsg(c.id, { from: 'them', type: 'transfer', amount: amt, note: note || 'รายได้', status: 'accepted' }); if (ppViewing(c.id)) renderThread(); }
+                }
                 if (ppGenAbort) aborted = true;
                 if (getCfg().sharedUniverse && !aborted) mentioned = findMentionedContact([...produced, voiceMsg ? voiceMsg.text : ''].join(' '), c.id);
             }
@@ -2534,7 +2851,7 @@ async function ppGenerateReply() {
     }
 }
 
-// ── ★ เจนแชทกลุ่ม ──
+// ── ★ เจนแชทกลุ่ม (0.9.8 fix: try/catch + retry ต่อสมาชิก) ──
 let ppGroupCooldownUntil = 0;
 async function ppGroupGenerate() {
     const g = ppActiveGroup;
@@ -2550,7 +2867,7 @@ async function ppGroupGenerate() {
     ppGenAbort = false;
     showGenControls(true);
 
-    let anyProduced = false;
+    let anyProduced = false, failCount = 0;
     try {
         const userName = getUserDisplayName();
         const rp = getCfg().universeAffectsRP ? mainChatRecap(10) : '';
@@ -2558,38 +2875,48 @@ async function ppGroupGenerate() {
         const order = g.replyMode === 'one' ? [members[Math.floor(Math.random() * members.length)]] : members.slice();
         for (const c of order) {
             if (ppGenAbort) break;
-            if (ppViewing(g.id)) { document.getElementById('pp-regen-row')?.remove(); showTyping(dname(c)); }
-            islandTyping(c);
-            const persona = getEffectivePersona(c.id);
-            const th = getThread(g.id).slice(-HIST_LIMIT);
-            const histTxt = th.map(m => {
-                if (m.type === 'image') return `${m.from === 'me' ? userName : (m.senderName || '?')}: [รูป${m.caption ? ': ' + m.caption : ''}]`;
-                if (m.type === 'voice') return `${m.from === 'me' ? userName : (m.senderName || '?')}: (เสียง) ${m.text}`;
-                if (m.type === 'sharedpost') return `${m.from === 'me' ? userName : (m.senderName || '?')}: [แชร์โพสต์]`;
-                return `${m.from === 'me' ? userName : (m.senderName || '?')}: ${m.text}`;
-            }).join('\n');
-            const others = members.filter(x => x.id !== c.id).map(x => dname(x));
-            const prompt = [
-                `[Group chat "${g.name}" — you are strictly ${dname(c)}. Members: ${members.map(dname).join(', ')} and ${userName}.]`,
-                persona ? `You ARE this character. Stay fully in persona: ${persona}` : null,
-                g.warnNote ? `Group rules/notes: ${g.warnNote}` : null,
-                g.knowEachOther ? `You KNOW the other members (${others.join(', ')}) and may talk to them.` : `You mostly focus on ${userName}; do not deeply interact with other members.`,
-                rp ? `Ongoing story context (stay consistent):\n${rp}` : null,
-                period ? `Important — ${period}` : null,
-                histTxt ? `\n<history>\n${histTxt}\n</history>` : null,
-                `\nReply as ${dname(c)} with 1-2 short chat lines. Put EVERY line inside double quotes " ".`,
-                `Same language (Thai). Output ONLY quoted chat lines. No planning, no narration, no asterisks. Anything outside " " is discarded.`,
-            ].filter(Boolean).join('\n');
-            let raw = await genWithRetry(prompt, 2);
-            if (ppGenAbort) break;
-            const lines = spokenOrFallback(raw, 2);
-            hideTyping();
-            for (const ln of lines) {
-                if (ppGenAbort) break;
-                await new Promise(r => setTimeout(r, 300 + Math.random() * 300));
-                pushThreadMsg(g.id, { from: 'them', sender: c.id, senderName: dname(c), text: ln });
-                anyProduced = true;
-                if (ppViewing(g.id)) renderThread();
+            // ★ แยก try/catch ต่อคน — คนเดียวพลาดไม่ล้มทั้งลูป
+            try {
+                if (ppViewing(g.id)) { document.getElementById('pp-regen-row')?.remove(); showTyping(dname(c)); }
+                islandTyping(c);
+                const persona = getEffectivePersona(c.id);
+                const th = getThread(g.id).slice(-HIST_LIMIT);
+                const histTxt = th.map(m => {
+                    if (m.type === 'image') return `${m.from === 'me' ? userName : (m.senderName || '?')}: [รูป${m.caption ? ': ' + m.caption : ''}]`;
+                    if (m.type === 'voice') return `${m.from === 'me' ? userName : (m.senderName || '?')}: (เสียง) ${m.text}`;
+                    if (m.type === 'transfer') return `${m.from === 'me' ? userName : (m.senderName || '?')}: [โอนเงิน ${fmtMoney(m.amount)}]`;
+                    if (m.type === 'sharedpost') return `${m.from === 'me' ? userName : (m.senderName || '?')}: [แชร์โพสต์]`;
+                    return `${m.from === 'me' ? userName : (m.senderName || '?')}: ${m.text}`;
+                }).join('\n');
+                const others = members.filter(x => x.id !== c.id).map(x => dname(x));
+                const prompt = [
+                    `[Group chat "${g.name}" — you are strictly ${dname(c)}. Members: ${members.map(dname).join(', ')} and ${userName}.]`,
+                    persona ? `You ARE this character. Stay fully in persona: ${persona}` : null,
+                    g.warnNote ? `Group rules/notes: ${g.warnNote}` : null,
+                    g.knowEachOther ? `You KNOW the other members (${others.join(', ')}) and may talk to them.` : `You mostly focus on ${userName}; do not deeply interact with other members.`,
+                    rp ? `Ongoing story context (stay consistent):\n${rp}` : null,
+                    period ? `Important — ${period}` : null,
+                    histTxt ? `\n<history>\n${histTxt}\n</history>` : null,
+                    `\nReply as ${dname(c)} with 1-2 short chat lines. Put EVERY line inside double quotes " ".`,
+                    `Same language (Thai). Output ONLY quoted chat lines. No planning, no narration, no asterisks. Anything outside " " is discarded.`,
+                ].filter(Boolean).join('\n');
+                let raw = await genWithRetry(prompt, 3);   // ★ retry 3 ต่อคน
+                if (ppGenAbort) { hideTyping(); break; }
+                const lines = spokenOrFallback(raw, 2);
+                hideTyping();
+                if (!lines.length) { failCount++; continue; }
+                for (const ln of lines) {
+                    if (ppGenAbort) break;
+                    await new Promise(r => setTimeout(r, 300 + Math.random() * 300));
+                    pushThreadMsg(g.id, { from: 'them', sender: c.id, senderName: dname(c), text: ln });
+                    anyProduced = true;
+                    if (ppViewing(g.id)) renderThread();
+                }
+            } catch (e) {
+                failCount++;
+                hideTyping();
+                console.warn('[pocket-phone] group member gen failed', dname(c), e);
+                // ไปต่อคนถัดไป ไม่ break
             }
         }
     } catch (e) { console.error('[pocket-phone] group gen', e); }
@@ -2599,6 +2926,7 @@ async function ppGroupGenerate() {
         hideTyping();
         if (g.cooldownSec) ppGroupCooldownUntil = Date.now() + g.cooldownSec * 1000;
         if (ppGenAbort) ppToast('หยุดแล้ว');
+        else if (!anyProduced) ppToast(failCount ? 'สมาชิกยังไม่ตอบ ลองกดอีกครั้ง' : 'ไม่มีการตอบ');
         if (ppViewing(g.id)) { renderThread(); islandCollapse(); }
         else {
             renderContactList(); islandCollapse();
@@ -2607,9 +2935,15 @@ async function ppGroupGenerate() {
     }
 }
 
-// pocket-phone/index.js — 0.9.7 — ท่อน 3/3 (renderPhoneSettings → call → interceptor → inject → boot → CSS)
+// pocket-phone/index.js — 0.9.8 — ท่อน 3/3 (renderPhoneSettings → boot → CSS)
 // ต่อจากท่อน 2/3 ที่จบตรง ppGroupGenerate
-// ⚠️ ต้องแปะครบทั้ง 3 ท่อน + เพิ่ม generate_interceptor ใน manifest
+// เปลี่ยนจาก 0.9.7:
+//   + renderPhoneSettings รองรับ ringtoneUrl
+//   + call: ringtone playback + fix พื้นหลังเบลอดำ (probe image + fallback)
+//   + inject: pp-attach-btn→ppAttachMenu · transacc/transdec · cmtmenu · feed/post stop · wallet · ringtone · glass · swipe
+//   + interceptor: delta-inject ต่อท้าย .mes ของ {{user}} ล่าสุด + parse PP_PAY/PP_EARN
+//   + injectCSS: transfer card · wallet · edited tag · bub-glass · call bg fix
+// ⚠️ ต้องแปะครบทั้ง 3 ท่อน + manifest มี generate_interceptor:"ppGenInterceptor"
 
 // ── phone Settings ──
 function renderPhoneSettings() {
@@ -2626,6 +2960,7 @@ function renderPhoneSettings() {
     const ac = document.getElementById('pp-set-accent'); if (ac) ac.value = cfg.accent || '#0a84ff';
     const bl = document.getElementById('pp-set-blur'); if (bl) bl.value = cfg.homeBlur ?? 6;
     const cap = document.getElementById('pp-set-caption'); if (cap) cap.value = cfg.imageCaptionMode || 'ask';
+    const rt = document.getElementById('pp-set-ringtone'); if (rt) rt.value = cfg.ringtoneUrl || '';
     const upWrap = document.getElementById('pp-user-av-upload-wrap');
     if (upWrap) upWrap.style.display = cfg.userAvatarMode === 'custom' ? 'inline-flex' : 'none';
     const pm = document.getElementById('pp-set-userpersona-mode'); if (pm) pm.value = cfg.userPersonaMode || 'perchat';
@@ -2645,6 +2980,23 @@ function renderPhoneSettings() {
     }
 }
 
+// ── ★ 0.9.8 RINGTONE playback ──
+function ppRingUrl(c) {
+    const cfg = getCfg();
+    const per = c ? (getChatStyle(c.id).ringtone || '') : '';
+    return (per && per.trim()) || (cfg.ringtoneUrl || '');
+}
+function ppPlayRingtone(c) {
+    const url = ppRingUrl(c);
+    const a = document.getElementById('pp-ringtone-audio');
+    if (!a || !url) return;
+    try { a.src = url; a.loop = true; a.currentTime = 0; const p = a.play(); if (p && p.catch) p.catch(() => {}); } catch {}
+}
+function ppStopRingtone() {
+    const a = document.getElementById('pp-ringtone-audio');
+    if (a) { try { a.pause(); a.removeAttribute('src'); a.load(); } catch {} }
+}
+
 // ── CALL SYSTEM ──
 let ppCall = null;
 function ppStartCall() {
@@ -2652,6 +3004,7 @@ function ppStartCall() {
     ppCall = { c, incoming: false, connected: false, startTs: 0, timer: null, generating: false, transcript: [] };
     ppRenderCallScreen(c, 'กำลังโทร…', false);
     ppNav('call');
+    ppPlayRingtone(c);
     setTimeout(() => { if (ppCall) ppConnectCall(); }, 1500 + Math.random() * 1200);
 }
 function ppIncomingCall(c) {
@@ -2661,6 +3014,18 @@ function ppIncomingCall(c) {
     if (!document.getElementById('pp-dialog')?.open) { islandNotify(c, 'สายเรียกเข้า'); ppOpen(); }
     ppNav('call');
     islandTyping(c);
+    ppPlayRingtone(c);
+}
+// ★ 0.9.8 fix พื้นหลังดำ: probe image ก่อน · ติด=โชว์เบลอ · ไม่ติด=fallback gradient
+function setCallBg(bgId, c) {
+    const bg = document.getElementById(bgId);
+    if (!bg) return;
+    const src = c && c.avatar;
+    if (!src) { bg.classList.add('no-img'); bg.style.backgroundImage = ''; return; }
+    const probe = new Image();
+    probe.onload = () => { bg.classList.remove('no-img'); bg.style.backgroundImage = `url("${src}")`; };
+    probe.onerror = () => { bg.classList.add('no-img'); bg.style.backgroundImage = ''; };
+    probe.src = src;
 }
 function ppRenderCallScreen(c, status, ringing) {
     const scr = document.getElementById('pp-scr-call'); if (!scr) return;
@@ -2670,12 +3035,12 @@ function ppRenderCallScreen(c, status, ringing) {
     const st = document.getElementById('pp-call-status'); if (st) st.textContent = status;
     const dur = document.getElementById('pp-call-dur'); if (dur) dur.style.display = 'none';
     const av = document.getElementById('pp-call-av'); if (av) av.innerHTML = contactAvatarHTML(c, 116);
-    const bg = document.getElementById('pp-call-bg');
-    if (bg) { if (c.avatar) { bg.classList.remove('no-img'); bg.style.backgroundImage = `url(${c.avatar})`; } else { bg.classList.add('no-img'); bg.style.backgroundImage = ''; } }
+    setCallBg('pp-call-bg', c);
     const stage = document.getElementById('pp-call-stage'); if (stage) stage.innerHTML = '';
 }
 function ppConnectCall() {
     if (!ppCall) return;
+    ppStopRingtone();
     ppCall.connected = true;
     ppCall.startTs = Date.now();
     islandCollapse();
@@ -2692,7 +3057,7 @@ function ppConnectCall() {
     if (ppCall.incoming) setTimeout(() => ppCallGenerate(true), 600);
 }
 function ppAcceptCall() { if (ppCall && ppCall.incoming && !ppCall.connected) ppConnectCall(); }
-function ppDeclineCall() { if (ppCall) ppEndCall(true); }
+function ppDeclineCall() { if (ppCall) { ppStopRingtone(); ppEndCall(true); } }
 function ppCallEmit(text, who) {
     const stage = document.getElementById('pp-call-stage'); if (!stage) return;
     const line = document.createElement('div');
@@ -2726,6 +3091,7 @@ async function ppCallGenerate(opener) {
         const up = getEffectiveUserPersona(c.id);
         const chatHist = getThread(c.id).slice(-HIST_LIMIT).map(m => {
             if (m.type === 'call') return `[${m.dir === 'out' ? 'โทรออก' : 'สายเข้า'}]`;
+            if (m.type === 'transfer') return `[โอนเงิน ${fmtMoney(m.amount)}${m.note ? ' — ' + m.note : ''}]`;
             if (m.type === 'image') return `${m.from === 'me' ? userName : dname(c)}: [ส่งรูป${m.caption ? ': ' + m.caption : ''}]`;
             if (m.type === 'voice') return `${m.from === 'me' ? userName : dname(c)}: (เสียง) ${m.text}`;
             if (m.type === 'sharedpost') return `${m.from === 'me' ? userName : dname(c)}: [แชร์โพสต์]`;
@@ -2768,6 +3134,7 @@ async function ppCallGenerate(opener) {
 }
 function ppEndCall(declined) {
     if (!ppCall) return;
+    ppStopRingtone();
     const c = ppCall.c;
     const connected = ppCall.connected;
     const secs = connected ? Math.floor((Date.now() - ppCall.startTs) / 1000) : 0;
@@ -2791,8 +3158,7 @@ function ppEndCall(declined) {
     const nm = document.getElementById('pp-callend-name'); if (nm) nm.textContent = dname(c);
     const sub = document.getElementById('pp-callend-sub'); if (sub) sub.textContent = connected ? 'สายสิ้นสุด' : (declined ? 'ปฏิเสธสาย' : 'ไม่ได้รับสาย');
     const dur = document.getElementById('pp-callend-dur'); if (dur) dur.textContent = connected ? `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}` : '';
-    const bg = document.getElementById('pp-callend-bg');
-    if (bg) { if (c.avatar) { bg.classList.remove('no-img'); bg.style.backgroundImage = `url(${c.avatar})`; } else { bg.classList.add('no-img'); bg.style.backgroundImage = ''; } }
+    setCallBg('pp-callend-bg', c);
     ppCall = null;
     islandCollapse();
     ppNav('callend');
@@ -2832,19 +3198,68 @@ function showTranscript(gi) {
     ppNav('transcript');
 }
 
-// ── ★ ตัวดักฟังแชทหลัก (ทาง A) ──
+// ── ★ 0.9.8 สรุปกิจกรรมมือถือ (delta-inject บทหลัก) ──
+function ppMobileActivitySummary() {
+    const cfg = getCfg(), userName = getUserDisplayName();
+    const parts = [];
+    const curId = currentCharacterId();
+    getContacts().forEach(c => {
+        if (c.id === curId) return;
+        const th = getThread(c.id);
+        if (!th.length) return;
+        const recent = th.slice(-3).map(m => {
+            if (m.type === 'call') return `[สาย]`;
+            if (m.type === 'transfer') return `[โอน ${fmtMoney(m.amount)}]`;
+            if (m.type === 'image') return `[รูป]`;
+            return `${m.from === 'me' ? userName : dname(c)}: ${String(m.text || '').slice(0, 60)}`;
+        }).join(' / ');
+        parts.push(`• คุยกับ ${dname(c)}: ${recent}`);
+    });
+    const un = getUserNote(); if (un) parts.push(`• สเตตัสของ ${userName}: "${un.text}"`);
+    const wh = (cfg.walletHistory || []).slice(-2); if (wh.length) parts.push(`• Wallet: ${wh.map(h => `${h.dir === 'in' ? '+' : '-'}${fmtMoney(h.amount)}${h.name ? ' (' + h.name + ')' : ''}`).join(', ')}`);
+    const feed = getFeedPosts().slice(-2).filter(p => p.author === 'user'); if (feed.length) parts.push(`• โพสต์ในฟีด: ${feed.map(p => (p.text || '[รูป]').slice(0, 50)).join(' | ')}`);
+    const cl = (cfg.callLog || []).slice(-1)[0]; if (cl) parts.push(`• สายล่าสุด: ${cl.incoming ? cl.name + ' โทรเข้า' : 'โทรหา ' + cl.name} (${cl.durText})`);
+    const period = periodPromptNote(); if (period) parts.push(`• ${period}`);
+    const text = parts.slice(-8).join('\n');
+    let msgCount = 0; Object.values(cfg.threads || {}).forEach(t => msgCount += t.length);
+    const fp = `${msgCount}|${(cfg.callLog || []).length}|${(cfg.walletHistory || []).length}|${getFeedPosts().length}|${un ? un.text : ''}|${cfg.walletBalance}`;
+    return { text, fp };
+}
+
+// ── ★ ตัวดักฟังแชทหลัก (bridge ทาง A + money + delta ต่อท้าย .mes ของ {{user}}) ──
+const PP_DELTA_MARK = '\n\n[Pocket Phone activity';
 window.ppGenInterceptor = function (chat, contextSize, abort, type) {
     try {
         if (!getCfg().universeAffectsRP) return;
         if (!Array.isArray(chat)) return;
+        const cfg = getCfg();
+        const userName = getUserDisplayName();
         const names = getContacts().map(dname).filter(Boolean).slice(0, 20).join(', ');
+
+        // bridge instruction (สั่งให้บอทพ่นคีย์) — ยังเป็น system message
         const instr =
             `[Pocket Phone bridge — OUT OF NARRATION, do not describe these tags in prose. ` +
-            `If a character would phone ${getUserDisplayName()}, append on its own line: [PP_CALL:CharacterName]. ` +
-            `If a character would text ${getUserDisplayName()}, append: [PP_MSG:CharacterName|the message]. ` +
-            `If a NEW character (not already a contact) starts contacting ${getUserDisplayName()} and matters to the story, append: [PP_NEWCHAT:CharacterName|the first message]. ` +
+            `If a character would phone ${userName}, append on its own line: [PP_CALL:CharacterName]. ` +
+            `If a character would text ${userName}, append: [PP_MSG:CharacterName|the message]. ` +
+            `If a NEW character (not already a contact) starts contacting ${userName} and matters to the story, append: [PP_NEWCHAT:CharacterName|the first message]. ` +
+            `If a character transfers money to ${userName} in-story, append: [PP_PAY:CharacterName|amount|reason]. ` +
+            `If ${userName} earns/receives money from an event, append: [PP_EARN:amount|reason]. ` +
             `Known contacts: ${names || '(none yet)'}. Use these tags ONLY when it truly fits the scene; otherwise output nothing extra.]`;
         chat.push({ is_user: false, is_system: true, name: 'PocketPhone', mes: instr });
+
+        // ★ delta-inject → ต่อท้าย .mes ของข้อความ {{user}} ล่าสุด (build-time เท่านั้น)
+        const { text } = ppMobileActivitySummary();
+        if (text) {
+            let ui = -1;
+            for (let i = chat.length - 1; i >= 0; i--) { if (chat[i] && chat[i].is_user) { ui = i; break; } }
+            if (ui >= 0 && chat[ui]) {
+                const base = String(chat[ui].mes || '');
+                // idempotent: ตัดบล็อก delta เก่าที่อาจติดมาก่อน แล้วต่อของใหม่
+                const cleanBase = base.split(PP_DELTA_MARK)[0];
+                const block = `${PP_DELTA_MARK} — ${userName} did this on their phone recently (context only, do NOT echo these lines or narrate them as tags):\n${text}]`;
+                chat[ui].mes = cleanBase + block;
+            }
+        }
     } catch (e) { console.warn('[pocket-phone] interceptor', e); }
 };
 
@@ -2861,7 +3276,7 @@ function ppHandleMainChatMessage() {
         if (fp === ppLastHandledMainMsg) return;
         ppLastHandledMainMsg = fp;
 
-        let m;
+        let m, dirty = false;
         const callRx = /\[PP_CALL:\s*([^\]]+)\]/gi;
         while ((m = callRx.exec(mes))) {
             const nm = m[1].trim();
@@ -2894,7 +3309,76 @@ function ppHandleMainChatMessage() {
             if (txt) { pushThreadMsg(c2.id, { from: 'them', text: txt }); pushNotif(c2.id, 'msg', txt); islandNotify(c2, `${dname(c2)}: ${txt}`); }
             if (ppCurrentScreen === 'messages') renderContactList();
         }
+        const payRx = /\[PP_PAY:\s*([^\]|]+)\|\s*(\d+)\s*(?:\|\s*([^\]]*))?\]/gi;
+        while ((m = payRx.exec(mes))) {
+            const nm = m[1].trim(), amt = Math.abs(parseInt(m[2], 10) || 0), note = (m[3] || '').trim();
+            if (!amt) continue;
+            const c2 = getContacts().find(x => dname(x) === nm) || getContacts().find(x => nm.includes(dname(x)));
+            if (c2) {
+                pushThreadMsg(c2.id, { from: 'them', type: 'transfer', amount: amt, note: note || 'โอนจากในเรื่อง', status: 'pending' });
+                pushNotif(c2.id, 'msg', `โอนเงิน ${fmtMoney(amt)}`);
+                if (ppViewing(c2.id)) renderThread(); else if (ppCurrentScreen === 'messages') renderContactList();
+                islandNotify(c2, `โอนเงินให้คุณ ${fmtMoney(amt)}`);
+            } else {
+                adjustUserBalance(amt); pushWalletHistory('in', amt, null, nm, note || 'จากในเรื่อง');
+            }
+        }
+        const earnRx = /\[PP_EARN:\s*(\d+)\s*(?:\|\s*([^\]]*))?\]/gi;
+        while ((m = earnRx.exec(mes))) {
+            const amt = Math.abs(parseInt(m[1], 10) || 0), note = (m[2] || '').trim();
+            if (amt) { adjustUserBalance(amt); pushWalletHistory('in', amt, null, 'รายได้', note || 'จากในเรื่อง'); if (ppCurrentScreen === 'wallet') renderWallet(); }
+        }
+
+        // ★ ซ่อนคีย์ bridge จากบทหลัก (ไม่ให้โชว์ในข้อความ) — เขียนกลับ .mes ของบทหลัก
+        const cleaned = mes.replace(/\[PP_(?:CALL|MSG|NEWCHAT|PAY|EARN):[^\]]*\]/gi, '').replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+        if (cleaned !== mes) {
+            last.mes = cleaned;
+            dirty = true;
+        }
+        if (dirty) {
+            try {
+                const idx = c.chat.length - 1;
+                const dom = document.querySelector(`#chat .mes[mesid="${idx}"] .mes_text`);
+                if (dom && typeof c.messageFormatting === 'function') dom.innerHTML = c.messageFormatting(cleaned, last.name, false, false, idx);
+                if (typeof c.saveChatDebounced === 'function') c.saveChatDebounced();
+                else if (typeof c.saveChat === 'function') c.saveChat();
+            } catch (e) { console.warn('[pocket-phone] main-chat rewrite', e); }
+        }
     } catch (e) { console.warn('[pocket-phone] main-chat parse', e); }
+}
+
+// ── ★ swipe-to-reply ──
+function bindSwipeReply(msgs) {
+    let startX = 0, startY = 0, target = null, active = false;
+    msgs.addEventListener('touchstart', e => {
+        const brow = e.target.closest('.pp-brow[data-mid]');
+        if (!brow) { target = null; return; }
+        target = brow; active = false;
+        startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+    }, { passive: true });
+    msgs.addEventListener('touchmove', e => {
+        if (!target) return;
+        const dx = e.touches[0].clientX - startX;
+        const dy = e.touches[0].clientY - startY;
+        if (!active && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.4) active = true;
+        if (active) {
+            const shift = Math.max(0, Math.min(64, dx));
+            target.style.transform = `translateX(${shift}px)`;
+            target.style.transition = 'none';
+        }
+    }, { passive: true });
+    msgs.addEventListener('touchend', e => {
+        if (!target) return;
+        const brow = target;
+        const dx = (e.changedTouches[0].clientX - startX);
+        brow.style.transition = 'transform .2s';
+        brow.style.transform = '';
+        if (active && dx > 46) {
+            const bubble = brow.querySelector('[data-msgidx]');
+            if (bubble) ppReplyToMsg(+bubble.dataset.msgidx);
+        }
+        target = null; active = false;
+    }, { passive: true });
 }
 
 // ── inject ──
@@ -2910,25 +3394,27 @@ function injectPhone() {
         '[data-nav]', '[data-cid]', '[data-gid]', '[data-add]', '[data-del]', '[data-pin]', '[data-delchat]',
         '[data-chatbg]', '[data-wp]', '[data-usernote]', '[data-botnote]', '[data-showtr]', '[data-dellog]',
         '[data-msgidx]', '[data-storyauthor]', '[data-userpersona]', '[data-chattab]', '[data-warp]',
-        '[data-feedtab]', '[data-postopen]', '[data-openpost]', '[data-postlike]', '[data-postmenu]', '[data-postshare]', '[data-delshared]',
-        '[data-cmtlike]', '[data-cmtreply]', '[data-cmtdel]', '[data-cmtwarp]', '[data-calday]',
+        '[data-feedtab]', '[data-postopen]', '[data-openpost]', '[data-postlike]', '[data-postmenu]', '[data-postshare]',
+        '[data-cmtlike]', '[data-cmtreply]', '[data-cmtdel]', '[data-cmtwarp]', '[data-cmtmenu]', '[data-calday]',
+        '[data-transacc]', '[data-transdec]',
         '#pp-close-btn', '#pp-chat-menu-btn', '#pp-chat-call-btn', '#pp-calllog-btn',
-        '#pp-rename-save', '#pp-persona-save', '#pp-bubble-clear',
-        '#pp-list-edit-btn', '#pp-gen', '#pp-stop', '#pp-regen-btn', '#pp-img-btn', '#pp-loadmore-btn',
+        '#pp-rename-save', '#pp-persona-save', '#pp-bubble-clear', '#pp-cs-ringtone-save',
+        '#pp-list-edit-btn', '#pp-gen', '#pp-stop', '#pp-regen-btn', '#pp-attach-btn', '#pp-loadmore-btn',
         '#pp-group-new-btn', '#pp-group-save-btn', '#pp-group-members-btn', '#pp-group-del-btn',
         '#pp-newpost-save', '#pp-newpost-img-clear', '#pp-newpost-cap-ai', '#pp-newpost-responders-btn',
         '#pp-call-gen', '#pp-call-end', '#pp-call-accept', '#pp-call-decline', '#pp-callend-ok',
         '#pp-calllog-back', '#pp-calllog-edit-btn',
         '#pp-open-profile', '#pp-profile-name-save', '#pp-profile-note-edit',
-        '#pp-feed-gen-btn', '#pp-feed-search-btn', '#pp-feed-add', '#pp-post-gen-btn', '#pp-comment-send',
+        '#pp-feed-gen-btn', '#pp-feed-stop-btn', '#pp-feed-search-btn', '#pp-feed-add',
+        '#pp-post-gen-btn', '#pp-post-stop-btn', '#pp-comment-send', '#pp-wallet-menu',
         '#pp-period-prev', '#pp-period-next', '#pp-period-help',
         '#pp-help-botcall', '#pp-help-universe', '#pp-help-affectrp', '#pp-help-caption',
         '#pp-help-userpersona', '#pp-help-personamode', '#pp-help-group', '#pp-help-responders',
         '#pp-island', '.pp-cc',
     ].join(',');
 
-    document.getElementById('pp-frame')?.addEventListener('click', e => {
-        // เสียง (อยู่ในฟอง) จับก่อน
+    const frame = document.getElementById('pp-frame');
+    frame?.addEventListener('click', e => {
         const voiceEl = e.target.closest('[data-voiceidx]');
         if (voiceEl) return ppPlayVoice(+voiceEl.dataset.voiceidx);
 
@@ -2936,6 +3422,10 @@ function injectPhone() {
         if (!t) return;
 
         if (t.id === 'pp-close-btn') return ppClose();
+
+        if (t.dataset && t.dataset.transacc != null) { e.stopPropagation(); return ppAcceptTransfer(+t.dataset.transacc); }
+        if (t.dataset && t.dataset.transdec != null) { e.stopPropagation(); return ppDeclineTransfer(+t.dataset.transdec); }
+
         if (t.dataset && t.dataset.nav) return ppNav(t.dataset.nav);
         if (t.dataset && t.dataset.cid) return ppOpenThread(t.dataset.cid);
         if (t.dataset && t.dataset.gid) return ppOpenGroup(t.dataset.gid);
@@ -2955,40 +3445,37 @@ function injectPhone() {
         if (t.dataset && t.dataset.userpersona != null && ppActiveContact) { getChatStyle(ppActiveContact.id).userPersonaId = t.dataset.userpersona; saveCfg(); renderUserPersonaList(); ppToast('ตั้ง persona แล้ว'); return; }
         if (t.dataset && t.dataset.storyauthor != null) return ppStoryAuthorTap(t.dataset.storyauthor);
 
-        // ★ ปุ่มลบการ์ดโพสต์ที่แชร์ในแชท (จับก่อน data-openpost)
-        if (t.dataset && t.dataset.delshared != null) { e.stopPropagation(); return ppMsgActions(+t.dataset.delshared); }
-
-        // Feed
         if (t.dataset && t.dataset.feedtab) { ppFeedTab = t.dataset.feedtab; renderFeed(); return; }
         if (t.dataset && t.dataset.postopen) { ppActivePost = t.dataset.postopen; return ppNav('postview'); }
         if (t.dataset && t.dataset.openpost) { ppActivePost = t.dataset.openpost; return ppNav('postview'); }
         if (t.dataset && t.dataset.postlike) return toggleFeedLike(t.dataset.postlike);
         if (t.dataset && t.dataset.postmenu) return ppDeletePost(t.dataset.postmenu);
         if (t.dataset && t.dataset.postshare) return ppSharePostToChat(t.dataset.postshare);
-        if (t.dataset && t.dataset.cmtlike) return toggleCommentLike(t.dataset.cmtlike);
-        if (t.dataset && t.dataset.cmtreply) return ppReplyComment(t.dataset.cmtreply);
-        if (t.dataset && t.dataset.cmtdel) return ppDeleteComment(t.dataset.cmtdel);
-        if (t.dataset && t.dataset.cmtwarp) return ppCommentWarp(t.dataset.cmtwarp);
+        if (t.dataset && t.dataset.cmtwarp) { e.stopPropagation(); return ppCommentWarp(t.dataset.cmtwarp); }
+        if (t.dataset && t.dataset.cmtlike) { e.stopPropagation(); return toggleCommentLike(t.dataset.cmtlike); }
+        if (t.dataset && t.dataset.cmtreply) { e.stopPropagation(); return ppReplyComment(t.dataset.cmtreply); }
+        if (t.dataset && t.dataset.cmtdel) { e.stopPropagation(); return ppDeleteComment(t.dataset.cmtdel); }
+        if (t.dataset && t.dataset.cmtmenu) return ppCommentActions(t.dataset.cmtmenu);
         if (t.id === 'pp-feed-gen-btn') return ppFeedGenerate();
+        if (t.id === 'pp-feed-stop-btn') return ppStopFeedGen();
         if (t.id === 'pp-feed-search-btn') return feedSearchTop5();
         if (t.id === 'pp-feed-add') { ppNewPostDraft = null; return ppNav('newpost'); }
         if (t.id === 'pp-post-gen-btn') return ppPostGenerate();
+        if (t.id === 'pp-post-stop-btn') return ppStopFeedGen();
         if (t.id === 'pp-comment-send') return ppSendComment();
+        if (t.id === 'pp-wallet-menu') return ppWalletMenu();
         if (t.id === 'pp-newpost-save') return ppNewPostSave();
         if (t.id === 'pp-newpost-img-clear') { if (ppNewPostDraft) { if (ppNewPostDraft.mediaKey) delMedia(ppNewPostDraft.mediaKey); ppNewPostDraft.mediaKey = null; ppNewPostDraft.dataUrl = null; renderNewPost(); } return; }
         if (t.id === 'pp-newpost-cap-ai') { if (ppNewPostDraft && ppNewPostDraft.dataUrl) { captionImageAIwithIsland(ppNewPostDraft.dataUrl).then(cap => { if (cap) { ppNewPostDraft.caption = cap; renderNewPost(); ppToast('ได้คำบรรยายแล้ว'); } else ppToast('AI บรรยายไม่ได้ พิมพ์เอง'); }); } return; }
         if (t.id === 'pp-newpost-responders-btn') { ppMultiSelect({ title: 'ใครตอบโพสต์นี้ได้', selected: (ppNewPostDraft && ppNewPostDraft.responders) || [], onDone: arr => { if (ppNewPostDraft) { ppNewPostDraft.responders = arr; renderNewPostResponderChips(); } } }); return; }
 
-        // ปฏิทิน
         if (t.dataset && t.dataset.calday) { togglePeriodDay(t.dataset.calday); renderPeriod(); return; }
         if (t.id === 'pp-period-prev') return ppCalNav(-1);
         if (t.id === 'pp-period-next') return ppCalNav(1);
         if (t.id === 'pp-period-help') return ppHelpPopup('ประจำเดือน', 'แตะวันในปฏิทินเพื่อทำเครื่องหมายว่าเป็นวันที่ประจำเดือนมา<br><br>หนุ่ม ๆ ในแอปจะรับรู้และใส่ใจเป็นพิเศษในวันนั้น รวมถึงช่วงใกล้ถึงรอบ<br><br>เก็บในเครื่อง ไม่ส่งไปไหน');
 
-        // แตะฟอง → แก้ไข/ลบ/ตอบ (หลัง data อื่นในฟอง)
         if (t.dataset && t.dataset.msgidx != null) return ppMsgActions(+t.dataset.msgidx);
 
-        // กลุ่ม
         if (t.id === 'pp-group-new-btn') { ppGroupDraft = null; return ppNav('groupnew'); }
         if (t.id === 'pp-group-save-btn') return ppGroupSave();
         if (t.id === 'pp-group-members-btn') { if (!ppGroupDraft) ppGroupDraft = { id: null, name: '', members: [], knowEachOther: true, cooldownSec: 0, replyMode: 'many', warnNote: '' }; ppMultiSelect({ title: 'เลือกสมาชิกกลุ่ม', selected: ppGroupDraft.members, onDone: arr => { ppGroupDraft.members = arr; renderGroupMemberChips(); } }); return; }
@@ -2996,11 +3483,12 @@ function injectPhone() {
 
         if (t.id === 'pp-chat-call-btn') return ppStartCall();
         if (t.id === 'pp-chat-menu-btn') return ppNav(ppActiveGroup ? 'groupsettings' : 'chatsettings');
-        if (t.id === 'pp-img-btn') return ppPickChatImage();
+        if (t.id === 'pp-attach-btn') return ppAttachMenu();
         if (t.id === 'pp-loadmore-btn') { ppHistShown += HIST_PAGE; renderThread(); return; }
         if (t.id === 'pp-list-edit-btn') { ppListEditMode = !ppListEditMode; renderContactList(); const b = document.getElementById('pp-list-edit-btn'); if (b) b.textContent = ppListEditMode ? 'เสร็จ' : 'แก้ไข'; return; }
         if (t.id === 'pp-rename-save' && ppActiveContact) { const v = (document.getElementById('pp-rename-input')?.value || '').trim(); const stored = getContacts().find(x => x.id === ppActiveContact.id); if (stored) { stored.customName = v || undefined; ppActiveContact.customName = v || undefined; saveCfg(); renderChatSettings(); renderContactList(); ppToast('เปลี่ยนชื่อแล้ว'); } return; }
         if (t.id === 'pp-persona-save' && ppActiveContact) { const st = getChatStyle(ppActiveContact.id); st.personaName = (document.getElementById('pp-persona-name')?.value || '').trim(); st.personaDesc = (document.getElementById('pp-persona-desc')?.value || '').trim(); saveCfg(); ppToast('บันทึก Persona แล้ว'); return; }
+        if (t.id === 'pp-cs-ringtone-save' && ppActiveContact) { getChatStyle(ppActiveContact.id).ringtone = (document.getElementById('pp-cs-ringtone')?.value || '').trim(); saveCfg(); ppToast('บันทึกเสียงเรียกเข้าแล้ว'); return; }
         if (t.id === 'pp-bubble-clear' && ppActiveContact) { getChatStyle(ppActiveContact.id).bubbleImg = false; saveCfg(); applyChatStyle(); ppToast('ล้างรูปฟองแล้ว'); return; }
         if (t.id === 'pp-calllog-btn' && ppActiveContact) { ppCallLogFilter = ppActiveContact.id; ppCallLogEdit = false; return ppNav('calllog'); }
         if (t.id === 'pp-calllog-back') { ppCallLogFilter = null; return ppNav(ppActiveContact ? 'chat' : 'messages'); }
@@ -3021,7 +3509,7 @@ function injectPhone() {
 
         if (t.id === 'pp-help-botcall') return ppHelpPopup('บอทโทรหา', 'ถ้าบอทตอบแล้วมีคำแนวจะโทร (โทรหา/เดี๋ยวโทร/calling you) แอปจะเปลี่ยนเป็นสายเรียกเข้าให้อัตโนมัติ<br><br>ปิด = บอทไม่โทรเข้าเอง คุณยังกดโทรออกได้');
         if (t.id === 'pp-help-universe') return ppHelpPopup('บอท/NPC ทักข้ามแชท', 'ถ้าบอทที่คุยด้วยเอ่ยชื่อคอนแทกต์อีกคน คนนั้นจะทักเข้ามาเองตามมา<br><br>ต้นทุน +1 generation ตอนมีคนทัก');
-        if (t.id === 'pp-help-affectrp') return ppHelpPopup('มีผลต่อโรลเพลย์หลัก', 'เมื่อเปิด ทุกอย่างในมือถือ (แชท/สาย/โน้ต/ฟีด) จะโยงกับบทหลัก และบทหลักจะโยงกลับมามือถือ<br><br>ถ้าบทหลักเอ่ยถึงการโทร/ทัก จะพ่นคีย์เด้งเข้ามือถือให้ · NPC ในบทหลักที่กระทบเนื้อเรื่องจะสร้างแชทเองอัตโนมัติ<br><br>ยกเว้นตัวละครหลักปัจจุบัน จะไม่ถูกลากมาเป็น NPC สุ่มในฟีด<br><br>ต้นทุน: +context ทุกการเจน · มีโอกาสยิงเจนต่อเนื่อง');
+        if (t.id === 'pp-help-affectrp') return ppHelpPopup('มีผลต่อโรลเพลย์หลัก', 'เมื่อเปิด ทุกอย่างในมือถือ (แชท/สาย/โน้ต/ฟีด/Wallet) จะโยงกับบทหลัก และบทหลักจะโยงกลับมามือถือ<br><br>กิจกรรมมือถือถูกสรุปต่อท้ายข้อความล่าสุดของคุณ ให้บอทในบทหลักรับรู้ · บทหลักพ่นคีย์ [PP_CALL/MSG/PAY/EARN] ได้<br><br>ยกเว้นตัวละครหลักปัจจุบัน ไม่ถูกลากมาเป็น NPC สุ่ม<br><br>ต้นทุน: +context ทุกการเจน');
         if (t.id === 'pp-help-caption') return ppHelpPopup('คำบรรยายรูป', 'บอทมองรูปไม่เห็นตรง ๆ ต้องมีคำบรรยายเป็นข้อความ<br><br>ทุกครั้งที่ลงรูปจะให้เลือก: ให้ AI ของ ST บรรยาย หรือ พิมพ์เอง เสมอ');
         if (t.id === 'pp-help-userpersona') return ppHelpPopup('Persona ของฉันที่บอทอ่าน', 'เลือกว่าจะให้บอทรู้จักคุณในฐานะ persona ไหน (อ่านอย่างเดียว ไม่แตะ ST จริง)');
         if (t.id === 'pp-help-personamode') return ppHelpPopup('โหมด Persona', 'แยกแต่ละแชท = เลือก persona ให้บอทแต่ละคนต่างกัน<br>เหมือนกันทุกแชท = ใช้ persona เดียวทุกบอท');
@@ -3051,6 +3539,10 @@ function injectPhone() {
     const npt = document.getElementById('pp-newpost-text');
     if (npt) npt.addEventListener('input', function () { this.style.height = 'auto'; this.style.height = Math.min(160, this.scrollHeight) + 'px'; });
 
+    // ★ swipe-to-reply
+    const msgs = document.getElementById('pp-msgs');
+    if (msgs) bindSwipeReply(msgs);
+
     // switches / selects
     const bind = (id, fn) => document.getElementById(id)?.addEventListener('change', fn);
     bind('pp-set-dark', e => { getCfg().theme = e.target.checked ? 'dark' : 'light'; saveCfg(); applyTheme(); });
@@ -3065,6 +3557,8 @@ function injectPhone() {
     bind('pp-set-shared-persona', e => { getCfg().sharedUserPersonaId = e.target.value; saveCfg(); });
     bind('pp-set-avauto', async e => { getCfg().userAvatarMode = e.target.checked ? 'auto' : 'custom'; saveCfg(); await refreshUserAvatar(); renderPhoneSettings(); renderNotesRow(); });
     bind('pp-npc-toggle', e => { if (ppActiveContact) { const c = getContacts().find(x => x.id === ppActiveContact.id); if (c) { c.npc = e.target.checked; ppActiveContact.npc = c.npc; saveCfg(); ppToast(c.npc ? 'ย้ายไปหมวด NPC' : 'ย้ายไปหมวดตัวละคร'); } } });
+    bind('pp-bubble-glass', e => { if (ppActiveContact) { getChatStyle(ppActiveContact.id).bubbleGlass = e.target.checked; saveCfg(); applyChatStyle(); } });
+    document.getElementById('pp-set-ringtone')?.addEventListener('input', e => { getCfg().ringtoneUrl = (e.target.value || '').trim(); saveCfg(); });
     document.getElementById('pp-set-accent')?.addEventListener('input', e => { getCfg().accent = e.target.value; saveCfg(); applyTheme(); });
     document.getElementById('pp-set-blur')?.addEventListener('input', e => { getCfg().homeBlur = +e.target.value; saveCfg(); applyWallpaper(); });
     document.getElementById('pp-bubble-color')?.addEventListener('input', e => { if (ppActiveContact) { getChatStyle(ppActiveContact.id).bubble = e.target.value; getChatStyle(ppActiveContact.id).bubbleImg = false; saveCfg(); applyChatStyle(); } });
@@ -3171,7 +3665,8 @@ window.PP_DIAG = function () {
         userPersonas: listUserPersonas().length, userPersonaMode: getCfg().userPersonaMode,
         stories: liveStories().length, feedPosts: getFeedPosts().length,
         periodDays: getPeriodDays().length, showFab: getCfg().showFab, affectRP: getCfg().universeAffectsRP,
-        wandBtn: !!document.getElementById('pp-wand-btn'),
+        walletBal: getCfg().walletBalance, walletHist: (getCfg().walletHistory || []).length,
+        ringtone: !!getCfg().ringtoneUrl, wandBtn: !!document.getElementById('pp-wand-btn'),
     };
     console.table(rows);
     ppToast('Diag → console');
@@ -3182,7 +3677,6 @@ function injectCSS() {
     if (document.getElementById('pp-css')) return;
     const s = document.createElement('style');
     s.id = 'pp-css';
-    // ไม่มี .pp-call-stage / .pp-call-line ที่นี่ — style.css เป็นเจ้าของ
     s.textContent = `
 .pp-list-head{padding:12px 16px 4px;font-size:13px;font-weight:700;color:var(--pp-txt3);text-transform:uppercase;letter-spacing:.5px;}
 .pp-notes-row{display:flex;gap:14px;padding:10px 16px 12px 16px;overflow-x:auto;scrollbar-width:none;border-bottom:.5px solid var(--pp-sep);}
@@ -3207,15 +3701,20 @@ function injectCSS() {
 .pp-chip{display:inline-flex;align-items:center;gap:6px;background:var(--pp-bg3);border-radius:16px;padding:4px 10px 4px 4px;font-size:13px;color:var(--pp-txt);margin:4px 4px 0 0;}
 .pp-group-member-chips{display:flex;flex-wrap:wrap;margin-top:4px;}
 
+.pp-brow{transition:transform .2s;}
 .pp-brow-col{display:flex;flex-direction:column;min-width:0;}
+.pp-brow.out .pp-brow-col{align-items:flex-end;}
 .pp-brow.grpmode{align-items:flex-end;gap:6px;}
 .pp-grp-msg-av{width:28px;flex-shrink:0;align-self:flex-end;}
 .pp-grp-msg-av.empty{visibility:hidden;}
 .pp-grp-sender{font-size:11px;color:var(--pp-txt3);font-weight:600;margin:0 0 2px 4px;}
+.pp-edited-tag{font-size:10px;color:var(--pp-txt3);margin:2px 6px 0;opacity:.7;}
 
-#pp-scr-call .pp-call-bg,#pp-scr-callend .pp-call-bg{position:absolute!important;inset:0!important;z-index:0!important;background-color:#0a0a12;background-size:cover!important;background-position:center!important;background-repeat:no-repeat!important;filter:blur(30px) brightness(.5) saturate(1.15);transform:scale(1.3);pointer-events:none;}
+#pp-scr-chat.bub-glass .pp-brow.out .pp-bubble{background:rgba(120,120,128,.28)!important;backdrop-filter:blur(18px) saturate(1.6);-webkit-backdrop-filter:blur(18px) saturate(1.6);border:.5px solid rgba(255,255,255,.18);color:var(--pp-mytext,#fff);}
+
+#pp-scr-call .pp-call-bg,#pp-scr-callend .pp-call-bg{position:absolute!important;inset:0!important;z-index:0!important;background-color:#12121a;background-size:cover!important;background-position:center!important;background-repeat:no-repeat!important;filter:blur(28px) brightness(.72) saturate(1.15);transform:scale(1.25);pointer-events:none;}
 #pp-scr-call .pp-call-bg.no-img,#pp-scr-callend .pp-call-bg.no-img{filter:none;transform:none;background:radial-gradient(120% 90% at 50% 0%,#2a2a33,#08080b 70%)!important;}
-#pp-scr-call .pp-call-bg::after,#pp-scr-callend .pp-call-bg::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,18,.30) 0%,rgba(10,10,18,.55) 55%,rgba(10,10,18,.82) 100%);}
+#pp-scr-call .pp-call-bg::after,#pp-scr-callend .pp-call-bg::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,18,.22) 0%,rgba(10,10,18,.42) 55%,rgba(10,10,18,.72) 100%);}
 
 .pp-img-btn{flex-shrink:0;width:36px;height:36px;border-radius:50%;border:none;background:var(--pp-bg3);color:var(--pp-txt);cursor:pointer;display:flex;align-items:center;justify-content:center;}
 .pp-img-btn:active{transform:scale(.88);}
@@ -3260,7 +3759,44 @@ function injectCSS() {
 .pp-callmsg.missed .pp-callmsg-title{color:#ff453a;}
 .pp-callmsg-sub{font-size:12px;opacity:.7;}
 
-.pp-bubble-shared{padding:0!important;background:transparent!important;overflow:visible;position:relative;}
+.pp-transfer{border-radius:18px;padding:12px 16px;max-width:240px;cursor:pointer;background:linear-gradient(160deg,#30d158,#24a148);color:#fff;box-shadow:0 4px 16px rgba(48,209,88,.3);}
+.pp-transfer.in{background:linear-gradient(160deg,#0a84ff,#0060df);box-shadow:0 4px 16px rgba(10,132,255,.3);}
+.pp-transfer.declined{background:linear-gradient(160deg,#6c6c70,#48484a);box-shadow:none;opacity:.85;}
+.pp-transfer-top{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:600;opacity:.9;}
+.pp-transfer-amt{font-size:26px;font-weight:800;margin:4px 0 2px;letter-spacing:-.5px;}
+.pp-transfer-note{font-size:13px;opacity:.9;margin-bottom:4px;}
+.pp-transfer-status{font-size:11px;opacity:.8;}
+.pp-transfer-acts{display:flex;gap:8px;margin-top:10px;}
+.pp-transfer-acts button{flex:1;border:none;border-radius:12px;padding:8px;font-size:13px;font-weight:600;cursor:pointer;}
+.pp-transfer-decline{background:rgba(0,0,0,.22);color:#fff;}
+.pp-transfer-accept{background:#fff;color:#0a84ff;}
+
+.pp-wallet-body{flex:1;overflow-y:auto;padding:16px;}
+.pp-wallet-card{border-radius:20px;padding:20px;background:linear-gradient(150deg,#1c1c22,#3a3a42);box-shadow:0 12px 34px rgba(0,0,0,.45);color:#fff;position:relative;overflow:hidden;}
+.pp-wallet-card::before{content:'';position:absolute;top:-40%;right:-20%;width:220px;height:220px;border-radius:50%;background:radial-gradient(circle,rgba(10,132,255,.35),transparent 70%);}
+.pp-wallet-card-top{display:flex;align-items:center;justify-content:space-between;position:relative;z-index:1;}
+.pp-wallet-card-label{font-size:13px;font-weight:600;opacity:.85;letter-spacing:.4px;}
+.pp-wallet-card-bal{font-size:34px;font-weight:800;margin:14px 0 6px;letter-spacing:-1px;position:relative;z-index:1;}
+.pp-wallet-card-foot{display:flex;align-items:center;justify-content:space-between;font-size:13px;opacity:.8;position:relative;z-index:1;}
+.pp-wallet-card-acc{font-variant-numeric:tabular-nums;letter-spacing:1px;}
+.pp-wallet-actions{display:flex;gap:10px;margin:16px 0;}
+.pp-wallet-act{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;background:var(--pp-bg3);border:none;border-radius:16px;padding:14px 8px;color:var(--pp-txt);font-size:12px;font-weight:600;cursor:pointer;}
+.pp-wallet-act:active{transform:scale(.95);}
+.pp-wallet-act svg{color:var(--pp-accent);}
+.pp-wallet-hist{background:var(--pp-bg3);border-radius:14px;overflow:hidden;}
+.pp-wallet-hrow{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:.5px solid var(--pp-sep);}
+.pp-wallet-hrow:last-child{border-bottom:none;}
+.pp-wallet-hic{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+.pp-wallet-hic.in{background:rgba(48,209,88,.2);color:#30d158;}
+.pp-wallet-hic.out{background:rgba(255,69,58,.16);color:#ff453a;}
+.pp-wallet-hmeta{flex:1;min-width:0;}
+.pp-wallet-hname{font-size:15px;font-weight:600;color:var(--pp-txt);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pp-wallet-hsub{font-size:12px;color:var(--pp-txt3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.pp-wallet-hamt{font-size:16px;font-weight:700;flex-shrink:0;font-variant-numeric:tabular-nums;}
+.pp-wallet-hamt.in{color:#30d158;}
+.pp-wallet-hamt.out{color:var(--pp-txt);}
+
+.pp-bubble-shared{padding:0!important;background:transparent!important;overflow:visible;}
 .pp-shared-card{background:var(--pp-bg3);border:1px solid var(--pp-sep);border-radius:14px;overflow:hidden;max-width:250px;cursor:pointer;}
 .pp-shared-top{display:flex;align-items:center;gap:8px;padding:8px 10px 4px;}
 .pp-shared-av{width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0;}
@@ -3269,8 +3805,6 @@ function injectCSS() {
 .pp-shared-text{font-size:13px;line-height:1.4;padding:2px 10px 8px;color:var(--pp-txt);}
 .pp-shared-img{width:100%;height:130px;background:#000 center/cover no-repeat;background-color:var(--pp-sep);}
 .pp-shared-gone{padding:14px;font-size:13px;color:var(--pp-txt3);text-align:center;}
-.pp-shared-del{position:absolute;top:-8px;right:-8px;width:24px;height:24px;border-radius:50%;border:none;background:#ff453a;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.4);}
-.pp-shared-del svg{width:13px;height:13px;}
 
 .pp-user-persona-list{display:flex;flex-direction:column;gap:6px;}
 .pp-persona-opt{display:flex;align-items:center;gap:10px;width:100%;background:var(--pp-bg3);border:1.5px solid transparent;border-radius:14px;padding:10px 14px;color:var(--pp-txt);font-size:14px;cursor:pointer;text-align:left;}
@@ -3317,7 +3851,7 @@ function injectCSS() {
 .pp-cmt.child{padding-left:44px;}
 .pp-cmt-av{width:30px;height:30px;border-radius:50%;object-fit:cover;background:var(--pp-bg3);flex-shrink:0;}
 .pp-cmt-body{flex:1;min-width:0;}
-.pp-cmt-bubble{background:var(--pp-bg3);border-radius:14px;padding:8px 12px;}
+.pp-cmt-bubble{background:var(--pp-bg3);border-radius:14px;padding:8px 12px;cursor:pointer;}
 .pp-cmt-name{font-size:13px;font-weight:700;color:var(--pp-txt);display:block;}
 .pp-cmt-to{font-size:11px;color:var(--pp-accent);cursor:pointer;margin-right:4px;}
 .pp-cmt-txt{font-size:14px;line-height:1.4;color:var(--pp-txt);word-break:break-word;}
@@ -3379,7 +3913,7 @@ function injectCSS() {
 
 @media (prefers-reduced-motion: reduce){
   .pp-sv-bar i{transition:none!important;animation:none!important;width:100%!important;}
-  #pp-voice-ov,.pp-voice-ov-inner span,.pp-warp-hl{transition:none!important;animation:none!important;}
+  #pp-voice-ov,.pp-voice-ov-inner span,.pp-warp-hl,.pp-brow{transition:none!important;animation:none!important;}
 }
 `;
     document.head.appendChild(s);
