@@ -1,11 +1,11 @@
-// pocket-phone/index.js — 0.9.6 — ท่อน 1/3 (ต้นไฟล์ → จบ buildPhone)
-// เปลี่ยนจาก 0.9.5: หมวดแชทเป็นแท็บ · แชทกลุ่ม(ตั้งค่าเต็ม) · ฟีดเลือกผู้ตอบ/รู้จักกัน
-//   · คอมเมนต์ซ้อนชั้น · โพสต์รูปมีหัวข้อ+คำบรรยาย(AI/เอง) · แชร์โพสต์เข้าแชท
-//   · reply วาร์ปได้(mid) · ลบคอมเมนต์ · แจ้งเตือนเด้งนอกมือถือ · เชื่อมโยง affectRP
+// pocket-phone/index.js — 0.9.7 — ท่อน 1/3 (ต้นไฟล์ → จบ buildPhone)
+// เปลี่ยนจาก 0.9.6: extractSpoken เอาเฉพาะข้อความใน " " (ตัดเครื่องหมาย) + fallback กันเงียบ
+//   · cleanReply/looksLikeThought แข็งขึ้น · fix multiselect กลุ่ม(data-mscid+stopPropagation)
+//   · โน้ต = context ทางเลือก บอทเลือกตอบเอง (logic 2/3) · [ ] = คำสั่งเบื้องหลัง ไม่โชว์
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 3 ท่อนก่อน
 
-const PP_VERSION = '0.9.6';
+const PP_VERSION = '0.9.7';
 const MODULE_NAME = 'pocket-phone';
 
 function ctx() {
@@ -69,7 +69,7 @@ const DEFAULTS = {
     sharedUniverse: false,
     universeAffectsRP: false,
     contacts: [],
-    threads: {},        // msg มี mid ตั้งแต่ 0.9.6 · group ใช้ key 'grp:xxx' · group msg มี sender(cid)
+    threads: {},
     chatStyle: {},
     callLog: [],
     pinned: [],
@@ -82,11 +82,10 @@ const DEFAULTS = {
     userPersonaMode: 'perchat',
     sharedUserPersonaId: '',
     showFab: true,
-    feedPosts: [],      // + title, responders:[cid]|null, knowEachOther:bool
+    feedPosts: [],
     periods: [],
-    // ── ★ 0.9.6 ──
-    groups: [],         // { id:'grp:xxx', name, members:[cid], knowEachOther, cooldownSec, replyMode:'one'|'many', warnNote }
-    notifCenter: [],    // แจ้งเตือนสะสม (สำหรับเด้งนอกมือถือ) { id, cid, kind, text, ts, seen }
+    groups: [],
+    notifCenter: [],
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -111,23 +110,63 @@ function saveCfg() {
 const esc = s => String(s == null ? '' : s)
     .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>').replace(/"/g, '"');
 
+// ── ★ 0.9.7 ด่านกรองจุดเดียว ──
+const _THOUGHT_TAGS = 'think|thinking|thought|thoughts|reason|reasoning|reflection|reflect|analysis|analyze|analyzing|plan|planning|planner|strategy|scratchpad|inner[_ ]?monologue|monologue|cot|meta|system|note[_ ]?to[_ ]?self';
+
 function cleanReply(t) {
     let s = String(t || '');
-    s = s.replace(/<(think|thought|thinking|reasoning|reflection|analysis|scratchpad|inner[_ ]?monologue)[^>]*>[\s\S]*?<\/\1>/gi, '');
-    s = s.replace(/<(think|thought|thinking|reasoning|reflection|analysis|scratchpad|inner[_ ]?monologue)[^>]*>[\s\S]*/gi, '');
-    s = s.replace(/\[(?:CoT|COT|THINK|THOUGHT|SYSTEM|CONTEXT|PERSONA|PHASE|STEP|OOC|INTERNAL|NOTE TO SELF)[^\]]*\][^\n]*/gi, '');
+    // บล็อกแท็ก ทั้งเปิด-ปิด และเปิดค้าง
+    s = s.replace(new RegExp(`<(${_THOUGHT_TAGS})[^>]*>[\\s\\S]*?<\\/(?:${_THOUGHT_TAGS})>`, 'gi'), '');
+    s = s.replace(new RegExp(`<(${_THOUGHT_TAGS})[^>]*>[\\s\\S]*`, 'gi'), '');
+    // ทั้งบรรทัด TAG: / TAG：
+    s = s.replace(new RegExp(`^\\s*(?:${_THOUGHT_TAGS})\\s*[:：].*$`, 'gim'), '');
+    // OOC วงเล็บคู่ + แท็ก html ที่เหลือ
     s = s.replace(/\(\([\s\S]*?\)\)/g, '');
+    s = s.replace(/<\/?[a-z][^>]*>/gi, '');
     return s.trim();
 }
+
 function looksLikeThought(line) {
     const s = String(line || '').trim();
     if (!s) return true;
-    if (/^\*[^*]+\*$/.test(s)) return true;
-    if (/^\([^)]+\)$/.test(s) && s.length > 8) return true;
-    if (/^_[^_]+_$/.test(s) && s.length > 8) return true;
-    if (/^(thinking|thought|internally|to (my|him|her)self|\(thinks?\b|i think to myself)\b/i.test(s)) return true;
+    if (/^[\[(].*[\])]$/.test(s) && s.length > 6) return true;     // ทั้งบรรทัดในวงเล็บ
+    if (/^\*.*\*$/.test(s)) return true;                            // *บรรยาย*
+    if (/^_.+_$/.test(s) && s.length > 8) return true;
+    if (new RegExp(`^(?:${_THOUGHT_TAGS})\\b\\s*[:\\-–]`, 'i').test(s)) return true;
+    if (/^(?:to (?:my|him|her)self|i think to myself|\(thinks?\b|internally\b)/i.test(s)) return true;
     return false;
 }
+
+// ★ คำสั่งใน [ ] ที่รับรู้ (parse แยกก่อน ไม่โชว์เป็นข้อความ)
+const PP_CMD_RX = /\[(NOTE|VOICE|NOTEREPLY|PP_CALL|PP_MSG|PP_NEWCHAT|LIKES)[^\]]*\][^\n]*/gi;
+
+// ★ 0.9.7 ดึงเฉพาะข้อความใน " " — ตัดเครื่องหมายออก · ที่เหลือปัดตก
+// รองรับ " " „ « » 「 」 『 』 ' '
+function extractSpoken(raw) {
+    let s = String(raw || '');
+    s = s.replace(PP_CMD_RX, '');   // เอาคำสั่งออกก่อน (parse แยกที่อื่น)
+    s = cleanReply(s);
+    const out = [];
+    const rx = /["“”„«»「」『』]([^"“”„«»「」『』\r\n]{1,})["“”„«»「」『』]/g;
+    let m;
+    while ((m = rx.exec(s))) {
+        let t = stripEmoji(m[1].trim()).replace(/^[\-–•\s]+/, '').trim();
+        if (t && !looksLikeThought(t)) out.push(t);
+    }
+    return out;
+}
+// รวม: เอาคำพูดใน " " ก่อน ถ้าไม่มีเลย → fallback กรองรายบรรทัด (กันบอทเงียบ)
+function spokenOrFallback(raw, maxLines) {
+    const q = extractSpoken(raw);
+    if (q.length) return q.slice(0, maxLines || 3);
+    let s = String(raw || '').replace(PP_CMD_RX, '');
+    s = cleanReply(s);
+    const lines = s.split(/\n+/)
+        .map(l => stripEmoji(l.trim().replace(/^["'“”‘’„«»「」『』]+|["'“”‘’„«»「」『』]+$/g, '')).trim())
+        .filter(Boolean).filter(l => !looksLikeThought(l));
+    return lines.slice(0, maxLines || 3);
+}
+
 function stripEmoji(t) {
     return String(t || '')
         .replace(/[\u{1F000}-\u{1FAFF}]/gu, '')
@@ -161,7 +200,7 @@ function getUserDisplayName() {
 }
 function dname(c) { return (c && (c.customName || c.name)) || '?'; }
 function newId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
-function newMid() { return 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }  // ★ id ข้อความ (วาร์ป)
+function newMid() { return 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 
 function currentCharacterId() {
     const c = ctx();
@@ -374,7 +413,7 @@ function applyFab() {
 }
 
 let ppActiveContact = null;
-let ppActiveGroup = null;     // ★ กลุ่มที่เปิดอยู่ (ถ้า set → renderThread โหมดกลุ่ม)
+let ppActiveGroup = null;
 let ppGeneratingId = null;
 let ppGenAbort = false;
 let ppCurrentScreen = 'home';
@@ -389,10 +428,9 @@ let ppFeedGenBusy = false;
 let ppActivePost = null;
 let ppCalMonth = new Date();
 let ppHistShown = HIST_PAGE;
-// ★ 0.9.6
-let ppChatTab = 'char';       // 'pin' | 'char' | 'npc' — แท็บหน้ารายชื่อ
-let ppGroupDraft = null;      // ร่างตั้งค่ากลุ่มก่อนสร้าง/แก้ไข
-let ppNewPostDraft = null;    // ร่างสร้างโพสต์ฟีด
+let ppChatTab = 'char';
+let ppGroupDraft = null;
+let ppNewPostDraft = null;
 
 function ppNav(screen) {
     if (screen === 'stories') screen = 'feed';
@@ -481,7 +519,7 @@ function ppActionSheet(items) {
     </div>`;
     host.appendChild(ov);
     const close = () => ov.remove();
-    ov.querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', () => { const it = items[+b.dataset.i]; close(); it.onClick && it.onClick(); }));
+    ov.querySelectorAll('[data-i]').forEach(b => b.addEventListener('click', (e) => { e.stopPropagation(); const it = items[+b.dataset.i]; close(); it.onClick && it.onClick(); }));
     ov.querySelector('.pp-sheet-cancel')?.addEventListener('click', close);
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
 }
@@ -512,16 +550,15 @@ function ppReplyComposer(opts) {
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
 }
 
-// ★ 0.9.6: ตัวเลือกหลายคน (เลือกสมาชิกกลุ่ม / เลือกผู้ตอบโพสต์)
+// ★ 0.9.7 FIX: multiselect — ใช้ data-mscid + stopPropagation กันเด้งไป delegation หลัก (บั๊กกลุ่มวาร์ป)
 function ppMultiSelect(opts) {
-    // opts: { title, selected:[cid], onDone(arr) }
     const host = document.getElementById('pp-frame') || document.body;
     const chosen = new Set(opts.selected || []);
     const ov = document.createElement('div');
     ov.className = 'pp-help-ov';
     ov.style.cssText = 'position:absolute;inset:0;z-index:9600;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.5);backdrop-filter:blur(4px);';
     const rows = getContacts().map(c =>
-        `<button class="pp-ms-row" data-cid="${esc(c.id)}" style="display:flex;align-items:center;gap:12px;width:100%;background:none;border:none;border-top:.5px solid rgba(255,255,255,.1);padding:11px 14px;color:#fff;cursor:pointer;text-align:left">
+        `<button class="pp-ms-row" data-mscid="${esc(c.id)}" style="display:flex;align-items:center;gap:12px;width:100%;background:none;border:none;border-top:.5px solid rgba(255,255,255,.1);padding:11px 14px;color:#fff;cursor:pointer;text-align:left">
             ${contactAvatarHTML(c, 36)}
             <span style="flex:1;font-size:15px">${esc(dname(c))}</span>
             <span class="pp-ms-check" style="width:22px;height:22px;border-radius:50%;border:1.5px solid rgba(255,255,255,.4);display:flex;align-items:center;justify-content:center;color:#fff">${chosen.has(c.id) ? ICON.check : ''}</span>
@@ -535,12 +572,13 @@ function ppMultiSelect(opts) {
     </div>`;
     host.appendChild(ov);
     const close = () => ov.remove();
-    ov.querySelectorAll('.pp-ms-row').forEach(b => b.addEventListener('click', () => {
-        const id = b.dataset.cid;
+    ov.querySelectorAll('.pp-ms-row').forEach(b => b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const id = b.dataset.mscid;
         if (chosen.has(id)) chosen.delete(id); else chosen.add(id);
         b.querySelector('.pp-ms-check').innerHTML = chosen.has(id) ? ICON.check : '';
     }));
-    ov.querySelector('.pp-ms-done')?.addEventListener('click', () => { opts.onDone([...chosen]); close(); });
+    ov.querySelector('.pp-ms-done')?.addEventListener('click', (e) => { e.stopPropagation(); opts.onDone([...chosen]); close(); });
     ov.addEventListener('click', e => { if (e.target === ov) close(); });
 }
 
@@ -571,7 +609,7 @@ function getChatStyle(id) {
     return s;
 }
 function pushThreadMsg(id, msg) {
-    getThread(id).push(Object.assign({ ts: Date.now(), mid: newMid() }, msg));  // ★ ใส่ mid ทุกข้อความใหม่
+    getThread(id).push(Object.assign({ ts: Date.now(), mid: newMid() }, msg));
     saveCfg();
 }
 function findMsgById(threadId, mid) {
@@ -597,7 +635,7 @@ function getEffectivePersona(id) {
     return getContactPersona(id);
 }
 
-// ── ★ กลุ่ม ──
+// ── กลุ่ม ──
 function isGroupId(id) { return typeof id === 'string' && id.startsWith('grp:'); }
 function getGroups() { return getCfg().groups || []; }
 function getGroup(id) { return getGroups().find(g => g.id === id); }
@@ -609,7 +647,6 @@ function groupAvatarHTML(g, size) {
     const s = size || 52;
     const mem = groupMemberContacts(g).slice(0, 2);
     if (!mem.length) return `<span class="pp-avatar pp-avatar-fb" style="width:${s}px;height:${s}px">${esc((g.name || 'G')[0])}</span>`;
-    // ซ้อนสองรูปแบบกลุ่ม
     const inner = mem.map((c, i) => `<span class="pp-grp-av-piece pos${i}">${contactAvatarHTML(c, Math.round(s * 0.62))}</span>`).join('');
     return `<span class="pp-grp-av" style="width:${s}px;height:${s}px">${inner}</span>`;
 }
@@ -650,7 +687,6 @@ function commentTotalLikes(cm) { return (cm.extraLikes || 0) + ((cm.likes || [])
 function topFeedPosts(n) { return getFeedPosts().filter(p => p.kind !== 'news').slice().sort((a, b) => postTotalLikes(b) - postTotalLikes(a)).slice(0, n || 5); }
 function postAuthorLabel(p) { if (p.author === 'user') return getUserDisplayName(); const c = getContacts().find(x => x.id === p.author); return c ? dname(c) : (p.authorName || 'ระบบ'); }
 function postAuthorAvatar(p) { if (p.author === 'user') return ppUserAvatarCache || ''; const c = getContacts().find(x => x.id === p.author); return c ? (c.avatar || '') : ''; }
-// ★ ผู้ตอบที่โพสต์อนุญาต (null=ทุกคน) ยกเว้น main char เมื่อ affectRP โยงกัน
 function postResponderPool(p) {
     let pool = getContacts().slice();
     if (getCfg().universeAffectsRP) pool = pool.filter(c => c.id !== currentCharacterId());
@@ -693,7 +729,6 @@ function periodPromptNote() {
     return '';
 }
 
-// ── ★ แจ้งเตือน (สำหรับเด้งนอกมือถือ) ──
 function pushNotif(cid, kind, text) {
     const cfg = getCfg();
     if (!cfg.notifCenter) cfg.notifCenter = [];
@@ -733,7 +768,6 @@ const ICON = {
     close: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3 10.6 10.6 16.9 4.3z"/></svg>`,
     search: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M15.5 14h-.8l-.3-.3a6.5 6.5 0 1 0-.7.7l.3.3v.8l5 5 1.5-1.5-5-5zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z"/></svg>`,
     calendar: `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M7 2v2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2h-2V2h-2v2H9V2H7zm12 8v10H5V10h14z"/></svg>`,
-    // ★ 0.9.6
     users: `<svg viewBox="0 0 24 24" width="22" height="22" fill="currentColor"><path d="M16 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm-8 0a3 3 0 1 0 0-6 3 3 0 0 0 0 6zm0 2c-2.7 0-8 1.3-8 4v3h9v-3c0-1 .4-1.9 1-2.6C9.3 13.1 8.6 13 8 13zm8 0c-.6 0-1.3.1-2 .2 1 .8 2 1.9 2 3.8v3h8v-3c0-2.7-5.3-4-8-4z"/></svg>`,
     share: `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M18 16a3 3 0 0 0-2.4 1.2l-7-4a3 3 0 0 0 0-2.4l7-4A3 3 0 1 0 15 5l-7 4a3 3 0 1 0 0 6l7 4A3 3 0 1 0 18 16z"/></svg>`,
     goto: `<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M14 4l-1.4 1.4L16.2 9H4v2h12.2l-3.6 3.6L14 16l6-6z"/></svg>`,
@@ -804,7 +838,6 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
-      <!-- ★ สร้าง/แก้ไขกลุ่ม -->
       <div class="pp-screen" id="pp-scr-groupnew">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="messages">${ICON.back}</button>
@@ -915,7 +948,6 @@ function buildPhone() {
         <div class="pp-home-bar"></div>
       </div>
 
-      <!-- FEED -->
       <div class="pp-screen" id="pp-scr-feed">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="home">${ICON.back}</button>
@@ -939,7 +971,6 @@ function buildPhone() {
         <input type="file" id="pp-feed-img-file" accept="image/*" hidden>
       </div>
 
-      <!-- ★ สร้างโพสต์ฟีด (หัวข้อ + รูป + คำบรรยาย + ผู้ตอบ + รู้จักกัน) -->
       <div class="pp-screen" id="pp-scr-newpost">
         <div class="pp-nav">
           <button class="pp-nav-back" data-nav="feed">${ICON.back}</button>
@@ -971,7 +1002,6 @@ function buildPhone() {
           </div>
           <div style="height:24px"></div>
         </div>
-        <input type="file" id="pp-newpost-img-file2" accept="image/*" hidden>
         <div class="pp-home-bar"></div>
       </div>
 
@@ -1177,7 +1207,7 @@ function buildPhone() {
 </dialog>`;
 }
 
-// pocket-phone/index.js — 0.9.6 — ท่อน 2/3 (renderNotesRow → generation)
+// pocket-phone/index.js — 0.9.7 — ท่อน 2/3 (renderNotesRow → ppGroupGenerate)
 // ต่อจากท่อน 1/3 ที่จบตรง buildPhone()
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 3 ท่อนก่อน
 
@@ -1249,7 +1279,7 @@ function msgPreview(m) {
     if (m.type === 'voice') return '(ข้อความเสียง)';
     if (m.type === 'sharedpost') return '[แชร์โพสต์]';
     const pre = m.replyTo ? (m.replyTo.kind === 'story' ? 'ตอบสตอรี่: ' : m.replyTo.kind === 'msg' ? 'ตอบ: ' : 'ตอบโน้ต: ') : '';
-    return pre + (m.text || '');
+    return (m.senderName ? m.senderName + ': ' : '') + pre + (m.text || '');
 }
 
 // ── หน้ารายชื่อ (แท็บ + กลุ่มบนสุด) ──
@@ -1266,7 +1296,7 @@ function renderContactList(filter) {
         const timeLbl = last ? fmtListTime(last.ts) : '';
         const pinned = isPinned(c.id);
         const editControls = ppListEditMode
-            ? `<div class="pp-row-edit" style="display:flex;gap:8px;flex-shrink:0">
+            ? `<div style="display:flex;gap:8px;flex-shrink:0">
                  <button class="pp-cs-btn" data-pin="${esc(c.id)}" style="padding:6px 10px;background:${pinned ? 'var(--pp-accent)' : 'var(--pp-bg3)'};color:${pinned ? '#fff' : 'var(--pp-txt)'}">${ICON.pin}</button>
                  <button class="pp-cs-btn" data-delchat="${esc(c.id)}" style="padding:6px 10px;background:rgba(255,69,58,.85);color:#fff">${ICON.trash}</button>
                </div>`
@@ -1287,7 +1317,7 @@ function renderContactList(filter) {
         const th = getThread(g.id);
         const last = th[th.length - 1];
         const typing = ppGeneratingId === g.id;
-        let preview = typing ? 'กำลังพิมพ์…' : (last ? ((last.senderName ? last.senderName + ': ' : (last.from === 'me' ? '' : '')) + msgPreview(last)) : `สมาชิก ${(g.members || []).length} คน`);
+        const preview = typing ? 'กำลังพิมพ์…' : (last ? msgPreview(last) : `สมาชิก ${(g.members || []).length} คน`);
         const timeLbl = last ? fmtListTime(last.ts) : '';
         return `<div class="pp-row" data-gid="${esc(g.id)}">
             ${groupAvatarHTML(g, 52)}
@@ -1300,23 +1330,20 @@ function renderContactList(filter) {
     };
 
     let contacts = getContacts().filter(c => contactCategory(c) === ppChatTab);
-    if (filter) contacts = contacts.filter(c => dname(c).toLowerCase().includes(filter.toLowerCase()));
+    if (filter) contacts = getContacts().filter(c => dname(c).toLowerCase().includes(filter.toLowerCase()));
     contacts.sort((a, b) => lastTs(b.id) - lastTs(a.id));
 
     let html = '';
-    // กลุ่มบนสุด (ไม่กรองตามแท็บ) เฉพาะตอนไม่ค้นหา
     const groups = getGroups().slice().sort((a, b) => lastTs(b.id) - lastTs(a.id));
     if (groups.length && !filter) {
         html += `<div class="pp-list-head">แชทกลุ่ม</div>` + groups.map(groupRowHTML).join('');
         html += `<div class="pp-list-head">${ppChatTab === 'pin' ? 'ปักหมุด' : ppChatTab === 'npc' ? 'NPC' : 'ตัวละคร'}</div>`;
     }
-
     if (!contacts.length && !groups.length) {
         list.innerHTML = `<div class="pp-empty">ยังไม่มีคนคุย<br><span>แตะปุ่มมุมขวาบนเพื่อเพิ่ม</span></div>`;
         return;
     }
-    html += contacts.length ? contacts.map(rowHTML).join('')
-        : `<div class="pp-empty" style="padding:40px 24px">ไม่มีในหมวดนี้</div>`;
+    html += contacts.length ? contacts.map(rowHTML).join('') : `<div class="pp-empty" style="padding:40px 24px">ไม่มีในหมวดนี้</div>`;
     list.innerHTML = html;
 }
 
@@ -1352,8 +1379,7 @@ function sharedPostCardHTML(m) {
     const avHTML = av ? `<img class="pp-shared-av" src="${esc(av)}" onerror="this.style.visibility='hidden'">` : `<span class="pp-shared-av pp-avatar-fb" style="width:26px;height:26px">${esc(postAuthorLabel(p)[0])}</span>`;
     return `<div class="pp-shared-card" data-openpost="${esc(p.id)}">
         <div class="pp-shared-top">${avHTML}<span class="pp-shared-name">${esc(postAuthorLabel(p))}</span><span class="pp-shared-tag">โพสต์</span></div>
-        ${p.title ? `<div class="pp-shared-title">${esc(p.title)}</div>` : ''}
-        <div class="pp-shared-text">${esc(String(p.text || '[รูปภาพ]').slice(0, 120))}</div>
+        ${p.text ? `<div class="pp-shared-text">${esc(String(p.text).slice(0, 120))}</div>` : ''}
         ${p.mediaKey ? `<div class="pp-shared-img" data-sharedimg="${esc(p.id)}"></div>` : ''}
     </div>`;
 }
@@ -1383,7 +1409,6 @@ function browHTML(m, idx, grouped, tail, groupMode) {
     } else {
         inner = esc(m.text);
     }
-    // โหมดกลุ่ม: ฝั่งบอทโชว์ชื่อ+รูปคนส่ง
     let senderTag = '', avatarCol = '';
     if (groupMode && !out && !grouped) {
         const sc = getContacts().find(x => x.id === m.sender);
@@ -1391,7 +1416,9 @@ function browHTML(m, idx, grouped, tail, groupMode) {
     }
     if (groupMode && !out) {
         const sc = getContacts().find(x => x.id === m.sender);
-        avatarCol = tail ? `<span class="pp-grp-msg-av">${sc ? contactAvatarHTML(sc, 28) : `<span class="pp-avatar pp-avatar-fb" style="width:28px;height:28px">${esc((m.senderName || '?')[0])}</span>`}</span>` : `<span class="pp-grp-msg-av empty"></span>`;
+        avatarCol = tail
+            ? `<span class="pp-grp-msg-av">${sc ? contactAvatarHTML(sc, 28) : `<span class="pp-avatar pp-avatar-fb" style="width:28px;height:28px">${esc((m.senderName || '?')[0])}</span>`}</span>`
+            : `<span class="pp-grp-msg-av empty"></span>`;
     }
     return `<div class="pp-brow ${out ? 'out' : 'in'}${grouped ? ' grp' : ''}${groupMode && !out ? ' grpmode' : ''}" data-from="${m.from}"${m.mid ? ` data-mid="${esc(m.mid)}"` : ''}>
         ${avatarCol}
@@ -1407,12 +1434,10 @@ function renderThread() {
     const c = ppActiveContact, g = ppActiveGroup;
     if (!isGroup && !c) { ppNav('messages'); return; }
     const tid = isGroup ? g.id : c.id;
-
     const name = document.getElementById('pp-chat-hdr-name');
     if (name) name.textContent = isGroup ? (g.name || 'กลุ่ม') : dname(c);
     const avSlot = document.getElementById('pp-chat-hdr-av');
     if (avSlot) avSlot.innerHTML = isGroup ? groupAvatarHTML(g, 30) : contactAvatarHTML(c, 30);
-    // ปุ่มโทรซ่อนในกลุ่ม
     const callBtn = document.getElementById('pp-chat-call-btn');
     if (callBtn) callBtn.style.display = isGroup ? 'none' : 'flex';
 
@@ -1426,26 +1451,26 @@ function renderThread() {
         const startIdx = Math.max(0, total - ppHistShown);
         let html = '';
         if (startIdx > 0) html += `<div class="pp-loadmore"><button id="pp-loadmore-btn" class="pp-regen">ดูข้อความเก่ากว่านี้ (${startIdx})</button></div>`;
-        let prevTs = null, firstShown = true, prevKey = null;
+        let prevTs = null, firstShown = true;
         th.forEach((m, i) => {
             if (i < startIdx) return;
             const div = firstShown ? chatDividerFull(m.ts || 0) : chatDivider(prevTs, m.ts || 0);
             firstShown = false;
             if (div) html += `<div class="pp-time-divider">${esc(div)}</div>`;
             prevTs = m.ts || prevTs;
-            if (m.type === 'call') { html += browHTML(m, i, false, true, isGroup); prevKey = null; return; }
+            if (m.type === 'call') { html += browHTML(m, i, false, true, isGroup); return; }
             const prev = (i - 1 >= startIdx) ? th[i - 1] : null;
             const next = th[i + 1];
             const curKey = m.from === 'me' ? 'me' : (isGroup ? (m.sender || 'them') : 'them');
-            const prevKeyReal = prev ? (prev.from === 'me' ? 'me' : (isGroup ? (prev.sender || 'them') : 'them')) : null;
+            const prevKey = prev ? (prev.from === 'me' ? 'me' : (isGroup ? (prev.sender || 'them') : 'them')) : null;
             const nextKey = next ? (next.from === 'me' ? 'me' : (isGroup ? (next.sender || 'them') : 'them')) : null;
-            const grouped = prev && prevKeyReal === curKey && prev.type !== 'call' && !m.replyTo && !div;
+            const grouped = prev && prevKey === curKey && prev.type !== 'call' && !m.replyTo && !div;
             const tail = !next || nextKey !== curKey || next.type === 'call';
             html += browHTML(m, i, grouped, tail, isGroup);
         });
-        if (ppGeneratingId !== tid) {
+        if (ppGeneratingId !== tid && !isGroup) {
             const last = th[total - 1];
-            if (!isGroup && last && last.from === 'them' && last.type !== 'call') {
+            if (last && last.from === 'them' && last.type !== 'call') {
                 html += `<div class="pp-regen-row" id="pp-regen-row"><button id="pp-regen-btn" class="pp-regen">${ICON.regen}รีเจน</button></div>`;
             }
         }
@@ -1471,7 +1496,6 @@ function hydrateThreadImages() {
     });
 }
 
-// ★ วาร์ปไปข้อความต้นทาง
 function ppWarpTo(mid) {
     const el = document.querySelector(`#pp-msgs .pp-brow[data-mid="${CSS.escape(mid)}"]`);
     if (!el) { ppToast('หาข้อความต้นทางไม่เจอ (อาจถูกซ่อน กด "ดูข้อความเก่ากว่านี้")'); return; }
@@ -1487,7 +1511,6 @@ function ppMsgActions(idx) {
     if (!m) return;
     const items = [];
     if (m.type !== 'call' && m.type !== 'sharedpost') {
-        // ตอบข้อความ (วาร์ปได้)
         if (m.mid) items.push({ label: 'ตอบข้อความนี้', onClick: () => ppReplyToMsg(idx) });
         items.push({ label: m.type === 'image' ? 'แก้ไขคำบรรยาย' : (m.type === 'voice' ? 'แก้ไขคำพูด' : 'แก้ไขข้อความ'), onClick: () => ppEditMsg(idx) });
     }
@@ -1500,13 +1523,10 @@ function ppReplyToMsg(idx) {
     const m = getThread(tid)[idx];
     if (!m || !m.mid) return;
     const author = m.from === 'me' ? getUserDisplayName() : (m.senderName || (ppActiveContact ? dname(ppActiveContact) : '?'));
-    const quoted = m.type === 'image' ? (m.caption || '[รูป]') : m.type === 'voice' ? m.text : m.text;
+    const quoted = m.type === 'image' ? (m.caption || '[รูป]') : (m.text || '');
     ppReplyComposer({
         title: 'ตอบข้อความ', quotedLabel: author, quoted,
-        onOk: (text) => {
-            pushThreadMsg(tid, { from: 'me', text, replyTo: { kind: 'msg', text: quoted, author, targetMid: m.mid } });
-            renderThread(); renderContactList();
-        }
+        onOk: (text) => { pushThreadMsg(tid, { from: 'me', text, replyTo: { kind: 'msg', text: quoted, author, targetMid: m.mid } }); renderThread(); renderContactList(); }
     });
 }
 function ppEditMsg(idx) {
@@ -1580,7 +1600,7 @@ async function applyChatStyle() {
     }
 }
 
-// ── ตั้งค่าแชท (เดี่ยว) ──
+// ── ตั้งค่าแชท ──
 function renderChatSettings() {
     const c = ppActiveContact;
     if (!c) { ppNav('messages'); return; }
@@ -1623,13 +1643,11 @@ function markChatSwatches() {
     document.querySelectorAll('#pp-chat-bg-swatches .pp-cs-swatch').forEach(b => b.classList.toggle('on', b.dataset.chatbg === st.bg));
 }
 
-// ── ★ กลุ่ม: editor / settings / create ──
+// ── กลุ่ม ──
 function renderGroupEditor() {
     const d = ppGroupDraft || (ppGroupDraft = { id: null, name: '', members: [], knowEachOther: true, cooldownSec: 0, replyMode: 'many', warnNote: '' });
-    const title = document.getElementById('pp-groupnew-title');
-    if (title) title.textContent = d.id ? 'แก้ไขกลุ่ม' : 'สร้างกลุ่ม';
-    const saveBtn = document.getElementById('pp-group-save-btn');
-    if (saveBtn) saveBtn.textContent = d.id ? 'บันทึก' : 'สร้าง';
+    const title = document.getElementById('pp-groupnew-title'); if (title) title.textContent = d.id ? 'แก้ไขกลุ่ม' : 'สร้างกลุ่ม';
+    const saveBtn = document.getElementById('pp-group-save-btn'); if (saveBtn) saveBtn.textContent = d.id ? 'บันทึก' : 'สร้าง';
     const nm = document.getElementById('pp-group-name'); if (nm) nm.value = d.name || '';
     const know = document.getElementById('pp-group-know'); if (know) know.checked = !!d.knowEachOther;
     const rm = document.getElementById('pp-group-replymode'); if (rm) rm.value = d.replyMode || 'many';
@@ -1642,8 +1660,7 @@ function renderGroupMemberChips() {
     if (!wrap || !ppGroupDraft) return;
     wrap.innerHTML = ppGroupDraft.members.map(cid => {
         const c = getContacts().find(x => x.id === cid);
-        if (!c) return '';
-        return `<span class="pp-chip">${contactAvatarHTML(c, 24)}<span>${esc(dname(c))}</span></span>`;
+        return c ? `<span class="pp-chip">${contactAvatarHTML(c, 24)}<span>${esc(dname(c))}</span></span>` : '';
     }).join('') || `<span style="font-size:12px;color:var(--pp-txt3);padding:4px">ยังไม่ได้เลือกสมาชิก</span>`;
 }
 function ppGroupSave() {
@@ -1658,15 +1675,8 @@ function ppGroupSave() {
     if ((d.members || []).length < 2) { ppToast('เลือกสมาชิกอย่างน้อย 2 คน'); return; }
     const cfg = getCfg();
     if (!cfg.groups) cfg.groups = [];
-    if (d.id) {
-        const g = cfg.groups.find(x => x.id === d.id);
-        if (g) Object.assign(g, d);
-        ppToast('บันทึกกลุ่มแล้ว');
-    } else {
-        d.id = 'grp:' + newId();
-        cfg.groups.push(structuredClone(d));
-        ppToast('สร้างกลุ่มแล้ว');
-    }
+    if (d.id) { const g = cfg.groups.find(x => x.id === d.id); if (g) Object.assign(g, d); ppToast('บันทึกกลุ่มแล้ว'); }
+    else { d.id = 'grp:' + newId(); cfg.groups.push(structuredClone(d)); ppToast('สร้างกลุ่มแล้ว'); }
     saveCfg();
     ppGroupDraft = null;
     ppNav('messages');
@@ -1714,7 +1724,7 @@ function renderProfile() {
     const nt = document.getElementById('pp-profile-note-txt'); if (nt) { const un = getUserNote(); nt.textContent = un ? un.text : '—'; }
 }
 
-// ── ★ AI บรรยายภาพ + Island สถานะ ──
+// ── AI บรรยายภาพ + Island ──
 function islandStatus(text) {
     clearTimeout(ppIslandTimer);
     ppIslandState = { cid: '_sys', name: 'Pocket Phone', avatar: '', kind: 'msg', text };
@@ -1730,14 +1740,14 @@ async function captionImageAI(dataUrl) {
     } catch (e) { console.warn('[pocket-phone] captionAI failed', e); }
     return '';
 }
+// ★ 0.9.7 fix: try/finally ยุบ Island ชัวร์ ไม่ค้าง
 async function captionImageAIwithIsland(dataUrl) {
     islandStatus('กำลังสร้างคำบรรยายภาพ…');
-    const cap = await captionImageAI(dataUrl);
-    islandCollapse();
-    return cap;
+    try { return await captionImageAI(dataUrl); }
+    finally { islandCollapse(); }
 }
 
-// ── ส่งรูปในแชท (สองทางเลือกทุกครั้ง) ──
+// ── ส่งรูปในแชท (สองทางเลือกเสมอ) ──
 function ppPickChatImage() { document.getElementById('pp-chat-img-file')?.click(); }
 async function ppHandleChatImage(file) {
     const tid = ppActiveGroup ? ppActiveGroup.id : (ppActiveContact ? ppActiveContact.id : null);
@@ -1747,13 +1757,8 @@ async function ppHandleChatImage(file) {
         const dataUrl = r.result;
         const mediaKey = 'chatimg-' + tid + '-' + newId();
         await saveMedia(mediaKey, dataUrl);
-        const finish = (caption) => {
-            const msg = ppActiveGroup ? { from: 'me', type: 'image', mediaKey, caption: caption || '' } : { from: 'me', type: 'image', mediaKey, caption: caption || '' };
-            pushThreadMsg(tid, msg);
-            renderThread(); renderContactList();
-        };
+        const finish = (caption) => { pushThreadMsg(tid, { from: 'me', type: 'image', mediaKey, caption: caption || '' }); renderThread(); renderContactList(); };
         const aiPath = async () => { const cap = await captionImageAIwithIsland(dataUrl); if (cap) finish(cap); else ppPrompt('AI บรรยายไม่ได้ พิมพ์เอง', '', v => finish(v)); };
-        // สองทางเลือกเสมอ
         ppActionSheet([
             { label: 'ให้ AI ของ ST บรรยายภาพ', onClick: aiPath },
             { label: 'พิมพ์คำบรรยายเอง', onClick: () => ppPrompt('ในภาพมีอะไร', '', v => finish(v)) },
@@ -1922,7 +1927,6 @@ function feedPostHTML(p) {
             <div class="pp-post-who"><span class="pp-post-name">${esc(postAuthorLabel(p))}</span><span class="pp-post-age">${esc(fmtNoteAge(p.ts))}</span></div>
             <button class="pp-post-more" data-postmenu="${esc(p.id)}">${ICON.menu}</button>
         </div>
-        ${p.title ? `<div class="pp-post-title" data-postopen="${esc(p.id)}">${esc(p.title)}</div>` : ''}
         ${p.text ? `<div class="pp-post-text" data-postopen="${esc(p.id)}">${esc(p.text)}</div>` : ''}
         ${img}
         <div class="pp-post-actions">
@@ -1953,7 +1957,6 @@ function renderPost() {
     const liked = (p.likes || []).includes('user');
     let html = `<div class="pp-post pp-post-full">
         <div class="pp-post-head">${avHTML}<div class="pp-post-who"><span class="pp-post-name">${esc(postAuthorLabel(p))}</span><span class="pp-post-age">${esc(fmtNoteAge(p.ts))}</span></div><button class="pp-post-more" data-postmenu="${esc(p.id)}">${ICON.menu}</button></div>
-        ${p.title ? `<div class="pp-post-title">${esc(p.title)}</div>` : ''}
         ${p.text ? `<div class="pp-post-text">${esc(p.text)}</div>` : ''}
         ${p.mediaKey ? `<div class="pp-post-img" data-postimg="${esc(p.id)}"></div>` : ''}
         <div class="pp-post-actions">
@@ -1992,11 +1995,10 @@ function renderPost() {
     hydrateFeedImages();
 }
 
-// ── สร้างโพสต์ (หน้าเต็ม) ──
+// ── สร้างโพสต์ ──
 function renderNewPost() {
     const d = ppNewPostDraft || (ppNewPostDraft = { text: '', mediaKey: null, dataUrl: null, caption: '', responders: [], knowEachOther: true });
-    const title = document.getElementById('pp-newpost-title');
-    if (title) title.textContent = ppFeedTab === 'news' ? 'เขียนข่าว' : 'สร้างโพสต์';
+    const title = document.getElementById('pp-newpost-title'); if (title) title.textContent = ppFeedTab === 'news' ? 'เขียนข่าว' : 'สร้างโพสต์';
     const ta = document.getElementById('pp-newpost-text'); if (ta) ta.value = d.text || '';
     const capBox = document.getElementById('pp-newpost-caption-box');
     const imgWrap = document.getElementById('pp-newpost-img-wrap');
@@ -2023,8 +2025,7 @@ function ppNewPostSave() {
     if (!d.text && !d.mediaKey) { ppToast('ใส่ข้อความหรือรูปก่อน'); return; }
     const kind = ppFeedTab === 'news' ? 'news' : 'post';
     getCfg().feedPosts.push({
-        id: newId(), author: 'user', kind,
-        title: d.text ? '' : '', text: d.text, caption: d.caption,
+        id: newId(), author: 'user', kind, text: d.text, caption: d.caption,
         mediaKey: d.mediaKey || undefined,
         responders: (d.responders && d.responders.length) ? d.responders.slice() : null,
         knowEachOther: d.knowEachOther,
@@ -2104,7 +2105,6 @@ function ppDeletePost(id) {
         { label: 'ลบโพสต์', danger: true, onClick: () => { const cfg = getCfg(); if (p.mediaKey) delMedia(p.mediaKey); cfg.feedPosts = cfg.feedPosts.filter(x => x.id !== id); saveCfg(); if (ppCurrentScreen === 'postview') ppNav('feed'); else renderFeed(); ppToast('ลบแล้ว'); } },
     ]);
 }
-// ── ★ แชร์โพสต์เข้าแชท ──
 function ppSharePostToChat(postId) {
     const targets = getContacts();
     if (!targets.length) { ppToast('ยังไม่มีคอนแทกต์'); return; }
@@ -2122,7 +2122,7 @@ function feedSearchTop5() {
     ppHelpPopup('5 อันดับยอดนิยม', body);
 }
 
-// ── ★ Feed generation (ไดนามิก + ผู้ตอบ + รู้จักกัน) ──
+// ── Feed generation ──
 function feedGenAffectRpBlock() { return getCfg().universeAffectsRP ? mainChatRecap(10) : ''; }
 async function ppFeedGenerate() {
     if (ppFeedGenBusy || ppGeneratingId) return;
@@ -2139,23 +2139,23 @@ async function ppFeedGenerate() {
         const period = periodPromptNote();
         const isNews = ppFeedTab === 'news';
         const prompt = [
-            isNews ? `[In-world news feed. Write a short news item from a local news source in this world.]` : `[Social media app — you are ${dname(author)}, posting to your feed.]`,
-            !isNews && persona ? `Character info for ${dname(author)}: ${persona}` : null,
+            isNews ? `[In-world news feed. Write a short news item from a local news source in this world.]`
+                   : `[Social media app — you ARE strictly ${dname(author)}. Post only in this character's own voice.]`,
+            !isNews && persona ? `You are this character. Stay fully in persona: ${persona}` : null,
             rp ? `Ongoing story context (stay consistent):\n${rp}` : null,
             period ? `Context about ${getUserDisplayName()}: ${period}` : null,
-            isNews ? `Write one short headline + 1-2 line body. Then a new line: [LIKES] N (realistic number).`
-                   : `Write a short spontaneous post (1-3 short lines) as ${dname(author)}. Then a new line: [LIKES] N (realistic like count).`,
-            `Reply in the SAME language the user uses (Thai). No emoji. No name prefix. No think/reasoning. Plain post text + the [LIKES] line only.`,
+            isNews ? `Write one short headline + 1-2 line body, each line inside quotes " ". Then a new line: [LIKES] N.`
+                   : `Write a short spontaneous post (1-3 short lines) as ${dname(author)}. Put EVERY line inside quotes " ". Then a new line: [LIKES] N (realistic like count).`,
+            `Reply in the SAME language the user uses (Thai). No emoji. No planning. No narration. Only the quoted post text + the [LIKES] line.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 3);
         const likesM = raw.match(/\[LIKES\]\s*(\d+)/i);
         const extraLikes = likesM ? parseInt(likesM[1], 10) : (Math.floor(Math.random() * 40) + 5);
-        raw = raw.replace(/\[LIKES\]\s*\d+/i, '').trim();
-        const text = raw.split(/\n+/).map(l => stripEmoji(l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')).trim()).filter(Boolean).filter(l => !looksLikeThought(l)).join('\n');
+        const text = spokenOrFallback(raw, 4).join('\n');
         if (text) {
             getCfg().feedPosts.push({ id: newId(), author: isNews ? 'news' : author.id, kind: isNews ? 'news' : 'post', authorName: isNews ? 'ข่าว' : dname(author), text: text.slice(0, 1000), responders: null, knowEachOther: true, ts: Date.now(), likes: [], extraLikes, comments: [], views: {} });
             saveCfg(); renderFeed(); ppToast('มีโพสต์ใหม่');
-            if (!isNews) pushNotif(author.id, 'feed', `${dname(author)} โพสต์ใหม่`);
+            if (!isNews) { pushNotif(author.id, 'feed', `${dname(author)} โพสต์ใหม่`); if (!document.getElementById('pp-dialog')?.open) islandNotify(author, `${dname(author)} โพสต์ใหม่`); }
         } else ppToast('บอทยังไม่โพสต์ ลองใหม่');
     } catch (e) { console.error('[pocket-phone] feed gen', e); ppToast('เชื่อมต่อไม่ได้'); }
     finally { ppFeedGenBusy = false; islandCollapse(); const b = document.getElementById('pp-feed-gen-btn'); if (b) b.disabled = false; }
@@ -2171,26 +2171,28 @@ async function ppPostGenerate() {
     islandStatus('กำลังให้บอทคอมเมนต์…');
     try {
         const names = pool.map(c => dname(c));
+        const profiles = pool.map(c => { const pr = getEffectivePersona(c.id); return `- ${dname(c)}: ${pr ? pr.replace(/\n+/g, ' ').slice(0, 160) : '(ไม่มีข้อมูล)'}`; }).join('\n');
         const existing = (p.comments || []).map(cm => `${commentAuthorLabel(cm)}: ${cm.text}`).join('\n');
         const period = periodPromptNote();
         const rp = feedGenAffectRpBlock();
         const know = p.knowEachOther !== false;
         const prompt = [
-            `[Social media comment section. Characters react to a post.]`,
-            `Post by ${postAuthorLabel(p)}: "${String(p.title || '')} ${String(p.text || '[รูปภาพ]')}".slice(0,400)`.slice(0, 460),
+            `[Social media comment section. Each character comments strictly IN THEIR OWN persona and voice.]`,
+            `Post by ${postAuthorLabel(p)}: "${String(p.text || '[รูปภาพ]').slice(0, 400)}"`,
             (p.caption ? `Image in post: ${p.caption}` : null),
+            `Character profiles (obey each voice exactly):\n${profiles}`,
             rp ? `Story context:\n${rp}` : null,
             period ? `Note about ${getUserDisplayName()}: ${period}` : null,
             existing ? `Existing comments:\n${existing}` : null,
-            `Characters who can comment: ${names.join(', ')}.`,
             know ? `These characters KNOW each other and can reply to one another and to ${getUserDisplayName()}.`
                  : `These characters do NOT know each other — each only reacts to the post itself, never to other commenters.`,
-            `Generate several NEW comments (no limit on count). Each on ITS OWN line, format EXACTLY: [CharacterName|N] comment text`,
-            know ? `To reply to a specific earlier commenter, format: [CharacterName|N > TargetName] comment text` : ``,
-            `where N is a small realistic like count. Use ONLY the listed names. Same language as post (Thai). No emoji. No think/reasoning.`,
+            `Generate several NEW comments (no limit). Each on ITS OWN line, format EXACTLY: [CharacterName|N] "comment text"`,
+            know ? `To reply to an earlier commenter: [CharacterName|N > TargetName] "comment text"` : ``,
+            `Put the comment text inside quotes " ". N = small realistic like count. Use ONLY these names: ${names.join(', ')}. Same language as post (Thai).`,
+            `STRICT: quoted text = only what that character would type. No planning, no narration, no asterisks, no extra tags.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 3);
-        const lines = raw.split(/\n+/).map(l => l.trim()).filter(Boolean);
+        const lines = String(raw || '').split(/\n+/).map(l => l.trim()).filter(Boolean);
         let added = 0;
         for (const line of lines) {
             const mm = line.match(/^\[([^|\]>]+?)\s*\|?\s*(\d*)\s*(?:>\s*([^\]]+))?\]\s*(.+)$/);
@@ -2198,7 +2200,9 @@ async function ppPostGenerate() {
             const authorName = mm[1].trim();
             const likes = parseInt(mm[2] || '0', 10) || 0;
             const targetName = (mm[3] || '').trim();
-            const text = stripEmoji(mm[4].trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')).trim();
+            // ดึงเฉพาะใน " " ของส่วน comment · ถ้าไม่มี quote ใช้ทั้งท่อน (fallback)
+            const q = extractSpoken(mm[4]);
+            let text = (q.length ? q[0] : stripEmoji(cleanReply(mm[4]).replace(/^["'“”‘’„«»「」『』]+|["'“”‘’„«»「」『』]+$/g, '')).trim());
             if (!text || looksLikeThought(text)) continue;
             const c = pool.find(x => dname(x) === authorName) || pool.find(x => authorName.includes(dname(x)));
             let parentId = null;
@@ -2270,11 +2274,7 @@ function islandRefresh() {
     const external = document.getElementById('pp-ext-island');
     const open = !!document.getElementById('pp-dialog')?.open;
     if (internal) { if (open && getCfg().dynamicIsland && ppIslandState) renderIslandInto(internal, ppIslandState); else renderIslandInto(internal, null); }
-    // ★ 0.9.6: แจ้งเตือน/NPC เด้งนอกจอ — ถ้า scope=always ให้เด้ง; ถ้าปิดแอปและมี state ที่เป็นแจ้งเตือนก็เด้ง
-    if (external) {
-        const showExt = !open && ppIslandState && (getCfg().islandScope === 'always' || ppIslandState.notify);
-        renderIslandInto(external, showExt ? ppIslandState : null);
-    }
+    if (external) { const showExt = !open && ppIslandState && (getCfg().islandScope === 'always' || ppIslandState.notify); renderIslandInto(external, showExt ? ppIslandState : null); }
 }
 function islandTyping(c) { clearTimeout(ppIslandTimer); ppIslandState = { cid: c.id, name: dname(c), avatar: c.avatar, kind: 'typing' }; islandRefresh(); }
 function islandShowReplies(c, lines, notify) {
@@ -2288,7 +2288,6 @@ function islandShowReplies(c, lines, notify) {
     };
     step();
 }
-// ★ แจ้งเตือนเด้งนอกจอ (แม้ปิดแอป)
 function islandNotify(c, text) {
     clearTimeout(ppIslandTimer);
     ppIslandState = { cid: c ? c.id : '', name: c ? dname(c) : 'Pocket Phone', avatar: c ? c.avatar : '', kind: 'msg', text, notify: true };
@@ -2387,7 +2386,7 @@ async function genWithRetry(prompt, tries) {
     const n = tries || 3;
     for (let t = 0; t < n; t++) {
         if (ppGenAbort) return '';
-        try { const raw = await genOnce(prompt); const cleaned = cleanReply(raw); if (cleaned) return cleaned; }
+        try { const raw = await genOnce(prompt); const cleaned = cleanReply(raw); if (cleaned) return raw; }
         catch (e) { lastErr = e; console.warn('[pocket-phone] gen retry', t + 1, e); }
         await new Promise(r => setTimeout(r, 400 * (t + 1)));
     }
@@ -2402,7 +2401,7 @@ async function ppRegenerate() {
     saveCfg(); renderThread(); ppGenerateReply();
 }
 
-// ── รวมจักรวาลแบบ A ──
+// ── รวมจักรวาล ──
 function findMentionedContact(text, excludeId) {
     const s = String(text || '');
     const cands = getContacts().filter(c => c.id !== excludeId).map(c => ({ c, names: [c.name, c.customName].filter(Boolean) })).sort((a, b) => Math.max(...b.names.map(n => n.length)) - Math.max(...a.names.map(n => n.length)));
@@ -2422,16 +2421,14 @@ async function universeInterject(interloper) {
             return `${m.from === 'me' ? userName : dname(interloper)}: ${m.text}`;
         }).join('\n');
         const prompt = [
-            `[Text messaging app — you are ${dname(interloper)}, messaging ${userName} right now.]`,
-            persona ? `Character info for ${dname(interloper)}: ${persona}` : null,
+            `[Text messaging app — you are strictly ${dname(interloper)}, messaging ${userName} right now.]`,
+            persona ? `You are this character. Stay in persona: ${persona}` : null,
             histTxt ? `\nEarlier messages with ${userName}:\n${histTxt}` : `\nYou haven't talked with ${userName} in a while.`,
-            `\nYou suddenly feel like reaching out to ${userName}. Send a short spontaneous message (1-2 short lines).`,
-            `Reply in the SAME language ${userName} uses (Thai). No emoji. No asterisks. No name prefix. No think/reasoning. Plain chat text only.`,
+            `\nSend a short spontaneous message (1-2 lines). Put EVERY line inside quotes " ".`,
+            `Same language as ${userName} (Thai). No emoji. No planning. No narration. Only quoted chat text.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 2);
-        const nameRx = new RegExp('^' + dname(interloper).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
-        raw = raw.replace(nameRx, '').trim();
-        const lines = raw.split(/\n+/).map(l => stripEmoji(l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')).trim()).filter(Boolean).filter(l => !looksLikeThought(l)).slice(0, 2);
+        const lines = spokenOrFallback(raw, 2);
         if (!lines.length) return;
         lines.forEach(t => pushThreadMsg(interloper.id, { from: 'them', text: t }));
         renderContactList();
@@ -2441,7 +2438,7 @@ async function universeInterject(interloper) {
     } catch (e) { console.warn('[pocket-phone] universe interject failed', e); }
 }
 
-// ── ★ เจนแชทเดี่ยว ──
+// ── ★ เจนแชทเดี่ยว (โน้ต = context ทางเลือก · เอาเฉพาะ " ") ──
 async function ppGenerateReply() {
     if (ppActiveGroup) return ppGroupGenerate();
     const c = ppActiveContact;
@@ -2476,42 +2473,38 @@ async function ppGenerateReply() {
         }).join('\n');
 
         const prompt = [
-            `[Text messaging app — you are ${dname(c)}, chatting with ${userName}.]`,
-            persona ? `Character info for ${dname(c)}: ${persona}` : null,
+            `[Text messaging app — you are strictly ${dname(c)}, chatting with ${userName}.]`,
+            persona ? `You ARE this character. Stay fully in this persona: ${persona}` : null,
             (up && (up.name || up.desc)) ? `Who you are chatting with (${userName}): ${[up.name ? 'Name: ' + up.name : '', up.desc].filter(Boolean).join(' — ')}` : null,
             rp ? `Ongoing roleplay context (stay consistent):\n${rp}` : null,
             period ? `Important — ${period}` : null,
-            `Status note from ${userName} right now: ${un ? `"${un.text}"` : '-'}.`,
+            // ★ โน้ต = context ทางเลือก บอทเลือกเอง ไม่บังคับ
+            un ? `${userName}'s current status note reads: "${un.text}". You may glance at it. Mention it ONLY if your character would naturally care — otherwise ignore it and just answer their latest message. Do NOT force a reaction.` : null,
             histTxt ? `\n<history>\n${histTxt}\n</history>` : null,
-            `\nReply in character as ${dname(c)} with short, natural text messages (1-3 short lines).`,
-            `Reply in the SAME language the conversation is using (Thai if they use Thai).`,
-            `IMPORTANT: send ONLY what you would actually TYPE in a chat app. No inner thoughts, narration, or actions. No asterisks. Plain chat text only.`,
-            getCfg().botCallKeyword ? `If you'd rather call than text, include a phrase like "โทรหา"/"เดี๋ยวโทร"/"calling you".` : null,
-            un ? `If you want to react to ${userName}'s status note, add ONE line exactly like: [NOTEREPLY] your reply to their note` : null,
-            `You may send a voice message instead of text by a line exactly like: [VOICE] the words you say (use rarely).`,
-            `You may set your own status note by a final line exactly like: [NOTE] your short status.`,
-            `STRICT: no emoji. No name prefix. No think/reasoning/OOC. Only plain chat lines + optional [NOTE]/[NOTEREPLY]/[VOICE] tags.`,
+            `\nReply to ${userName}'s LAST message, in character as ${dname(c)}, with 1-3 short chat lines.`,
+            `Reply in the SAME language the conversation uses (Thai if Thai).`,
+            `OUTPUT FORMAT (strict): put EVERY chat line inside double quotes " ". Example: "ไง" then next line "ทำอะไรอยู่".`,
+            `Output ONLY quoted chat lines. No planning, no thoughts, no narration, no actions, no asterisks, no descriptions. Anything outside " " will be discarded.`,
+            getCfg().botCallKeyword ? `If you'd rather call than text, include a phrase like "โทรหา"/"เดี๋ยวโทร" inside a quoted line.` : null,
+            `You may send a voice message by a single line exactly: [VOICE] the words (use rarely).`,
+            `You may update your own status by a final line exactly: [NOTE] your short status.`,
         ].filter(Boolean).join('\n');
 
         let raw = await genWithRetry(prompt, 3);
         if (ppGenAbort) { aborted = true; }
         else {
-            const nameRx = new RegExp('^' + dname(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
-            raw = raw.replace(nameRx, '').trim();
+            // parse คำสั่ง [ ] ก่อน
             const noteMatch = raw.match(/\[NOTE\]\s*(.+)$/im);
-            if (noteMatch) { setBotNote(c.id, stripEmoji(noteMatch[1].trim())); raw = raw.replace(/\[NOTE\]\s*.+$/im, '').trim(); }
-            let noteReplyMsg = null;
-            const nrMatch = raw.match(/\[NOTEREPLY\]\s*(.+)$/im);
-            if (nrMatch) { const t = stripEmoji(nrMatch[1].trim()); if (t && un) noteReplyMsg = { from: 'them', text: t, replyTo: { kind: 'note', text: un.text, author: userName } }; raw = raw.replace(/\[NOTEREPLY\]\s*.+$/im, '').trim(); }
+            if (noteMatch) setBotNote(c.id, stripEmoji(noteMatch[1].trim().replace(/["“”„«»「」『』]/g, '')));
             let voiceMsg = null;
             const vMatch = raw.match(/\[VOICE\]\s*(.+)$/im);
-            if (vMatch) { const t = stripEmoji(vMatch[1].trim()); if (t) voiceMsg = { from: 'them', type: 'voice', text: t, dur: Math.min(30, Math.max(2, Math.round(t.length / 8))) }; raw = raw.replace(/\[VOICE\]\s*.+$/im, '').trim(); }
-            const lines = raw.split(/\n+/).map(l => stripEmoji(l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')).trim()).filter(Boolean).filter(l => !looksLikeThought(l)).slice(0, 3);
+            if (vMatch) { const t = stripEmoji(vMatch[1].trim().replace(/["“”„«»「」『']/g, '')); if (t) voiceMsg = { from: 'them', type: 'voice', text: t, dur: Math.min(30, Math.max(2, Math.round(t.length / 8))) }; }
+            // ★ เอาเฉพาะข้อความใน " "
+            const lines = spokenOrFallback(raw, 3);
             const hasCall = getCfg().botCallKeyword && ppViewing(c.id) && lines.some(wantsToCall);
-            if (!lines.length && !noteReplyMsg && !voiceMsg) failed = true;
+            if (!lines.length && !voiceMsg) failed = true;
             else if (hasCall) botCalls = true;
             else {
-                if (noteReplyMsg && !ppGenAbort) { pushThreadMsg(c.id, noteReplyMsg); produced.push(noteReplyMsg.text); if (ppViewing(c.id)) renderThread(); }
                 for (let i = 0; i < lines.length && !ppGenAbort; i++) {
                     await new Promise(r => setTimeout(r, i === 0 ? 300 : 500 + Math.random() * 400));
                     if (ppGenAbort) break;
@@ -2541,7 +2534,7 @@ async function ppGenerateReply() {
     }
 }
 
-// ── ★ เจนแชทกลุ่ม (ไล่สมาชิกตาม replyMode + knowEachOther + cooldown) ──
+// ── ★ เจนแชทกลุ่ม ──
 let ppGroupCooldownUntil = 0;
 async function ppGroupGenerate() {
     const g = ppActiveGroup;
@@ -2577,20 +2570,19 @@ async function ppGroupGenerate() {
             }).join('\n');
             const others = members.filter(x => x.id !== c.id).map(x => dname(x));
             const prompt = [
-                `[Group chat "${g.name}" — you are ${dname(c)}. Members: ${members.map(dname).join(', ')} and ${userName}.]`,
-                persona ? `Character info for ${dname(c)}: ${persona}` : null,
+                `[Group chat "${g.name}" — you are strictly ${dname(c)}. Members: ${members.map(dname).join(', ')} and ${userName}.]`,
+                persona ? `You ARE this character. Stay fully in persona: ${persona}` : null,
                 g.warnNote ? `Group rules/notes: ${g.warnNote}` : null,
                 g.knowEachOther ? `You KNOW the other members (${others.join(', ')}) and may talk to them.` : `You mostly focus on ${userName}; do not deeply interact with other members.`,
                 rp ? `Ongoing story context (stay consistent):\n${rp}` : null,
                 period ? `Important — ${period}` : null,
                 histTxt ? `\n<history>\n${histTxt}\n</history>` : null,
-                `\nReply as ${dname(c)} with 1-2 short chat lines. Same language (Thai). No emoji, no name prefix, no think/reasoning. Plain chat text only.`,
+                `\nReply as ${dname(c)} with 1-2 short chat lines. Put EVERY line inside double quotes " ".`,
+                `Same language (Thai). Output ONLY quoted chat lines. No planning, no narration, no asterisks. Anything outside " " is discarded.`,
             ].filter(Boolean).join('\n');
             let raw = await genWithRetry(prompt, 2);
             if (ppGenAbort) break;
-            const nameRx = new RegExp('^' + dname(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
-            raw = raw.replace(nameRx, '').trim();
-            const lines = raw.split(/\n+/).map(l => stripEmoji(l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')).trim()).filter(Boolean).filter(l => !looksLikeThought(l)).slice(0, 2);
+            const lines = spokenOrFallback(raw, 2);
             hideTyping();
             for (const ln of lines) {
                 if (ppGenAbort) break;
@@ -2606,15 +2598,18 @@ async function ppGroupGenerate() {
         showGenControls(false);
         hideTyping();
         if (g.cooldownSec) ppGroupCooldownUntil = Date.now() + g.cooldownSec * 1000;
-        if (ppGenAbort) { ppToast('หยุดแล้ว'); }
+        if (ppGenAbort) ppToast('หยุดแล้ว');
         if (ppViewing(g.id)) { renderThread(); islandCollapse(); }
-        else { renderContactList(); islandCollapse(); if (anyProduced) { const last = getThread(g.id).slice().reverse().find(m => m.from === 'them'); if (last) { pushNotif(g.id, 'group', `${last.senderName}: ${last.text}`); } } }
+        else {
+            renderContactList(); islandCollapse();
+            if (anyProduced) { const last = getThread(g.id).slice().reverse().find(m => m.from === 'them'); if (last) { pushNotif(g.id, 'group', `${last.senderName}: ${last.text}`); if (!document.getElementById('pp-dialog')?.open) islandNotify({ id: g.id, name: g.name, avatar: '' }, `${last.senderName}: ${last.text}`); } }
+        }
     }
 }
 
-// pocket-phone/index.js — 0.9.6 — ท่อน 3/3 (renderPhoneSettings → call → interceptor → inject → boot → CSS)
+// pocket-phone/index.js — 0.9.7 — ท่อน 3/3 (renderPhoneSettings → call → interceptor → inject → boot → CSS)
 // ต่อจากท่อน 2/3 ที่จบตรง ppGroupGenerate
-// ⚠️ ต้องแปะครบทั้ง 3 ท่อนจึงจะทำงาน + เพิ่ม generate_interceptor ใน manifest
+// ⚠️ ต้องแปะครบทั้ง 3 ท่อน + เพิ่ม generate_interceptor ใน manifest
 
 // ── phone Settings ──
 function renderPhoneSettings() {
@@ -2663,7 +2658,6 @@ function ppIncomingCall(c) {
     if (!c || ppCall) return;
     ppCall = { c, incoming: true, connected: false, startTs: 0, timer: null, generating: false, transcript: [] };
     ppRenderCallScreen(c, 'สายเรียกเข้า', true);
-    // ★ ถ้าไม่ได้เปิดแอปอยู่ → เด้งแจ้งเตือนนอกจอ + เปิดแอปให้เห็นสาย
     if (!document.getElementById('pp-dialog')?.open) { islandNotify(c, 'สายเรียกเข้า'); ppOpen(); }
     ppNav('call');
     islandTyping(c);
@@ -2743,23 +2737,21 @@ async function ppCallGenerate(opener) {
         const period = periodPromptNote();
         const tr = (ppCall.transcript || []).slice(-10).map(m => `${m.from === 'me' ? userName : dname(c)}: ${m.text}`).join('\n');
         const prompt = [
-            `[Phone call — you are ${dname(c)}, on a voice call with ${userName}${opener ? ' that you just started' : ''}.]`,
-            persona ? `Character info for ${dname(c)}: ${persona}` : null,
+            `[Phone call — you are strictly ${dname(c)}, on a voice call with ${userName}${opener ? ' that you just started' : ''}.]`,
+            persona ? `You ARE this character. Stay fully in persona: ${persona}` : null,
             (up && (up.name || up.desc)) ? `Who you are talking to (${userName}): ${[up.name ? 'Name: ' + up.name : '', up.desc].filter(Boolean).join(' — ')}` : null,
             rp ? `Ongoing roleplay context (stay consistent):\n${rp}` : null,
             period ? `Important — ${period}` : null,
             chatHist ? `Your recent text chat with ${userName} (you remember this):\n${chatHist}` : null,
-            un ? `${userName}'s current status note: "${un.text}"` : null,
+            un ? `${userName}'s current status note: "${un.text}" (glance only, do not force a reaction).` : null,
             tr ? `\nThis call so far:\n${tr}` : null,
             opener ? `\nYou called ${userName}. Open the call — say why you're calling, referencing what you two were just talking about if relevant.` : `\nContinue the call naturally.`,
-            `\nSpeak as ${dname(c)} out loud. Break your speech into SHORT separate lines (one thought per line), like people actually talk on the phone.`,
-            `Reply in the SAME language ${userName} uses (Thai if Thai). No emoji. No asterisks. No stage directions. No name prefix. No think/reasoning. Only spoken words.`,
-            `If you want to end the call, say a natural goodbye (บาย / ไว้คุยกันใหม่ / แล้วเจอกัน).`,
+            `\nSpeak as ${dname(c)} out loud. Break your speech into SHORT separate lines. Put EVERY spoken line inside double quotes " ".`,
+            `Same language as ${userName} (Thai). Output ONLY quoted spoken lines. No planning, no narration, no stage directions, no asterisks. Anything outside " " is discarded.`,
+            `If you want to end the call, say a natural goodbye (บาย / ไว้คุยกันใหม่ / แล้วเจอกัน) inside a quoted line.`,
         ].filter(Boolean).join('\n');
         let raw = await genWithRetry(prompt, 3);
-        const nameRx = new RegExp('^' + dname(c).replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*:\\s*', 'gim');
-        raw = raw.replace(nameRx, '').replace(/\*[^*]*\*/g, '').trim();
-        const lines = raw.split(/\n+/).map(l => stripEmoji(l.trim().replace(/^["'“”‘’]|["'“”‘’]$/g, '')).trim()).filter(Boolean).filter(l => !looksLikeThought(l)).slice(0, 5);
+        const lines = spokenOrFallback(raw, 5);
         if (!lines.length) lines.push('…');
         if (ty) ty.classList.remove('show');
         let saidBye = false;
@@ -2841,7 +2833,6 @@ function showTranscript(gi) {
 }
 
 // ── ★ ตัวดักฟังแชทหลัก (ทาง A) ──
-// interceptor แทรกคำสั่งเงียบ ๆ ให้บอทบทหลักพ่นคีย์เมื่อเหมาะ (เฉพาะตอน affectRP เปิด)
 window.ppGenInterceptor = function (chat, contextSize, abort, type) {
     try {
         if (!getCfg().universeAffectsRP) return;
@@ -2857,7 +2848,6 @@ window.ppGenInterceptor = function (chat, contextSize, abort, type) {
     } catch (e) { console.warn('[pocket-phone] interceptor', e); }
 };
 
-// parse คีย์จากข้อความบทหลักที่เพิ่งเข้ามา
 let ppLastHandledMainMsg = '';
 function ppHandleMainChatMessage() {
     try {
@@ -2868,10 +2858,9 @@ function ppHandleMainChatMessage() {
         if (!last || last.is_user) return;
         const mes = String(last.mes || '');
         const fp = mes.slice(0, 40) + '|' + mes.length;
-        if (fp === ppLastHandledMainMsg) return;   // กันซ้ำ
+        if (fp === ppLastHandledMainMsg) return;
         ppLastHandledMainMsg = fp;
 
-        // [PP_CALL:ชื่อ]
         let m;
         const callRx = /\[PP_CALL:\s*([^\]]+)\]/gi;
         while ((m = callRx.exec(mes))) {
@@ -2879,7 +2868,6 @@ function ppHandleMainChatMessage() {
             const c2 = getContacts().find(x => dname(x) === nm) || getContacts().find(x => nm.includes(dname(x)));
             if (c2 && !ppCall) { ppActiveContact = c2; ppActiveGroup = null; ppIncomingCall(c2); }
         }
-        // [PP_MSG:ชื่อ|ข้อความ]
         const msgRx = /\[PP_MSG:\s*([^\]|]+)\|([^\]]+)\]/gi;
         while ((m = msgRx.exec(mes))) {
             const nm = m[1].trim(), txt = stripEmoji(m[2].trim());
@@ -2891,17 +2879,15 @@ function ppHandleMainChatMessage() {
                 islandNotify(c2, txt);
             }
         }
-        // [PP_NEWCHAT:ชื่อ|ข้อความ] — สร้างคอนแทกต์ใหม่ออโต้ ไม่ต้องแก้ไฟล์
         const newRx = /\[PP_NEWCHAT:\s*([^\]|]+)\|([^\]]+)\]/gi;
         while ((m = newRx.exec(mes))) {
             const nm = m[1].trim(), txt = stripEmoji(m[2].trim());
             if (!nm) continue;
             let c2 = getContacts().find(x => dname(x) === nm);
             if (!c2) {
-                // ลองจับคู่กับตัวละครใน ST ก่อน (จะได้มี persona) ไม่งั้นสร้าง NPC เปล่า
                 const st = listStCharacters().find(x => x.name === nm);
                 const cfg = getCfg();
-                c2 = st ? { id: st.id, name: st.name, avatar: st.avatar, npc: !st } : { id: 'npc:' + newId(), name: nm, avatar: '', npc: true };
+                c2 = st ? { id: st.id, name: st.name, avatar: st.avatar } : { id: 'npc:' + newId(), name: nm, avatar: '', npc: true };
                 cfg.contacts.push(c2);
                 saveCfg();
             }
@@ -2924,7 +2910,7 @@ function injectPhone() {
         '[data-nav]', '[data-cid]', '[data-gid]', '[data-add]', '[data-del]', '[data-pin]', '[data-delchat]',
         '[data-chatbg]', '[data-wp]', '[data-usernote]', '[data-botnote]', '[data-showtr]', '[data-dellog]',
         '[data-msgidx]', '[data-storyauthor]', '[data-userpersona]', '[data-chattab]', '[data-warp]',
-        '[data-feedtab]', '[data-postopen]', '[data-postlike]', '[data-postmenu]', '[data-postshare]', '[data-openpost]',
+        '[data-feedtab]', '[data-postopen]', '[data-openpost]', '[data-postlike]', '[data-postmenu]', '[data-postshare]', '[data-delshared]',
         '[data-cmtlike]', '[data-cmtreply]', '[data-cmtdel]', '[data-cmtwarp]', '[data-calday]',
         '#pp-close-btn', '#pp-chat-menu-btn', '#pp-chat-call-btn', '#pp-calllog-btn',
         '#pp-rename-save', '#pp-persona-save', '#pp-bubble-clear',
@@ -2942,8 +2928,10 @@ function injectPhone() {
     ].join(',');
 
     document.getElementById('pp-frame')?.addEventListener('click', e => {
+        // เสียง (อยู่ในฟอง) จับก่อน
         const voiceEl = e.target.closest('[data-voiceidx]');
         if (voiceEl) return ppPlayVoice(+voiceEl.dataset.voiceidx);
+
         const t = e.target.closest(SEL);
         if (!t) return;
 
@@ -2966,6 +2954,9 @@ function injectPhone() {
         if (t.dataset && t.dataset.botnote) return ppOpenBotNote(t.dataset.botnote);
         if (t.dataset && t.dataset.userpersona != null && ppActiveContact) { getChatStyle(ppActiveContact.id).userPersonaId = t.dataset.userpersona; saveCfg(); renderUserPersonaList(); ppToast('ตั้ง persona แล้ว'); return; }
         if (t.dataset && t.dataset.storyauthor != null) return ppStoryAuthorTap(t.dataset.storyauthor);
+
+        // ★ ปุ่มลบการ์ดโพสต์ที่แชร์ในแชท (จับก่อน data-openpost)
+        if (t.dataset && t.dataset.delshared != null) { e.stopPropagation(); return ppMsgActions(+t.dataset.delshared); }
 
         // Feed
         if (t.dataset && t.dataset.feedtab) { ppFeedTab = t.dataset.feedtab; renderFeed(); return; }
@@ -2994,7 +2985,7 @@ function injectPhone() {
         if (t.id === 'pp-period-next') return ppCalNav(1);
         if (t.id === 'pp-period-help') return ppHelpPopup('ประจำเดือน', 'แตะวันในปฏิทินเพื่อทำเครื่องหมายว่าเป็นวันที่ประจำเดือนมา<br><br>หนุ่ม ๆ ในแอปจะรับรู้และใส่ใจเป็นพิเศษในวันนั้น รวมถึงช่วงใกล้ถึงรอบ<br><br>เก็บในเครื่อง ไม่ส่งไปไหน');
 
-        // แตะฟอง → แก้ไข/ลบ/ตอบ
+        // แตะฟอง → แก้ไข/ลบ/ตอบ (หลัง data อื่นในฟอง)
         if (t.dataset && t.dataset.msgidx != null) return ppMsgActions(+t.dataset.msgidx);
 
         // กลุ่ม
@@ -3021,7 +3012,7 @@ function injectPhone() {
         if (t.id === 'pp-call-end') return ppEndCall();
         if (t.id === 'pp-call-accept') return ppAcceptCall();
         if (t.id === 'pp-call-decline') return ppDeclineCall();
-        if (t.id === 'pp-callend-ok') return ppNav(ppActiveGroup ? 'chat' : (ppActiveContact ? 'chat' : 'messages'));
+        if (t.id === 'pp-callend-ok') return ppNav((ppActiveGroup || ppActiveContact) ? 'chat' : 'messages');
         if (t.id === 'pp-open-profile') return ppNav('profile');
         if (t.id === 'pp-profile-name-save') { getCfg().userAppName = (document.getElementById('pp-profile-name')?.value || '').trim(); saveCfg(); refreshUserAvatar(); renderProfile(); renderNotesRow(); ppToast('บันทึกชื่อแล้ว'); return; }
         if (t.id === 'pp-profile-note-edit') { const cur = getUserNote(); return ppPrompt('โน้ตของฉัน (24 ชม.)', cur ? cur.text : '', v => { setUserNote(v); renderProfile(); renderNotesRow(); ppToast(v ? 'ลงโน้ตแล้ว' : 'ลบโน้ตแล้ว'); }); }
@@ -3035,7 +3026,7 @@ function injectPhone() {
         if (t.id === 'pp-help-userpersona') return ppHelpPopup('Persona ของฉันที่บอทอ่าน', 'เลือกว่าจะให้บอทรู้จักคุณในฐานะ persona ไหน (อ่านอย่างเดียว ไม่แตะ ST จริง)');
         if (t.id === 'pp-help-personamode') return ppHelpPopup('โหมด Persona', 'แยกแต่ละแชท = เลือก persona ให้บอทแต่ละคนต่างกัน<br>เหมือนกันทุกแชท = ใช้ persona เดียวทุกบอท');
         if (t.id === 'pp-help-group') return ppHelpPopup('การตอบโต้ในกลุ่ม', 'สมาชิกรู้จักกัน = แต่ละคนเห็นข้อความคนอื่นและคุยโต้กันได้<br><br>โหมดตอบ: หลายคน = ทุกสมาชิกตอบต่อการกดเจน 1 ครั้ง · ทีละคน = สุ่มคนเดียวตอบ<br><br>คูลดาวน์ = เวลาต่ำสุดระหว่างการกดเจน (กันรัว)');
-        if (t.id === 'pp-help-responders') return ppHelpPopup('ใครตอบโพสต์นี้ได้', 'เลือกว่าจะให้ใครมาคอมเมนต์โพสต์นี้ได้บ้าง (เว้นว่าง = ทุกคน)<br><br>สวิตช์ "ผู้ตอบรู้จักกัน" = คอมเมนต์เห็นกันและตอบโต้กันได้ · ปิด = ต่างคนต่างคอมเมนต์ ไม่รับรู้กัน');
+        if (t.id === 'pp-help-responders') return ppHelpPopup('ใครตอบโพสต์นี้ได้', 'เลือกว่าจะให้ใครมาคอมเมนต์โพสต์นี้ได้บ้าง (เว้นว่าง = ทุกคน)<br><br>สวิตช์ "ผู้ตอบรู้จักกัน" = คอมเมนต์เห็นกันและตอบโต้กันได้ · ปิด = ต่างคนต่างคอมเมนต์');
     });
 
     // input
@@ -3205,12 +3196,10 @@ function injectCSS() {
 .pp-note-sep{flex-shrink:0;width:1px;align-self:stretch;margin:22px 2px 0 2px;background:var(--pp-sep);position:relative;}
 .pp-note-sep::before{content:attr(data-label);position:absolute;top:-20px;left:50%;transform:translateX(-50%);font-size:10px;color:var(--pp-txt3);white-space:nowrap;}
 
-/* ★ แท็บหมวดแชท */
 .pp-chat-tabs{display:flex;flex-shrink:0;border-bottom:.5px solid var(--pp-sep);}
 .pp-chat-tab{flex:1;background:none;border:none;color:var(--pp-txt3);font-size:14px;font-weight:600;padding:10px 0;cursor:pointer;border-bottom:2px solid transparent;}
 .pp-chat-tab.on{color:var(--pp-txt);border-bottom-color:var(--pp-accent);}
 
-/* ★ กลุ่ม avatar / chips */
 .pp-grp-av{position:relative;display:inline-block;flex-shrink:0;}
 .pp-grp-av-piece{position:absolute;border-radius:50%;overflow:hidden;box-shadow:0 0 0 2px var(--pp-bg2,#1c1c1e);}
 .pp-grp-av-piece.pos0{top:0;left:0;}
@@ -3218,25 +3207,21 @@ function injectCSS() {
 .pp-chip{display:inline-flex;align-items:center;gap:6px;background:var(--pp-bg3);border-radius:16px;padding:4px 10px 4px 4px;font-size:13px;color:var(--pp-txt);margin:4px 4px 0 0;}
 .pp-group-member-chips{display:flex;flex-wrap:wrap;margin-top:4px;}
 
-/* ★ กลุ่ม: ชื่อผู้ส่ง + avatar column */
 .pp-brow-col{display:flex;flex-direction:column;min-width:0;}
 .pp-brow.grpmode{align-items:flex-end;gap:6px;}
 .pp-grp-msg-av{width:28px;flex-shrink:0;align-self:flex-end;}
 .pp-grp-msg-av.empty{visibility:hidden;}
 .pp-grp-sender{font-size:11px;color:var(--pp-txt3);font-weight:600;margin:0 0 2px 4px;}
 
-/* พื้นหลังหน้าโทร */
 #pp-scr-call .pp-call-bg,#pp-scr-callend .pp-call-bg{position:absolute!important;inset:0!important;z-index:0!important;background-color:#0a0a12;background-size:cover!important;background-position:center!important;background-repeat:no-repeat!important;filter:blur(30px) brightness(.5) saturate(1.15);transform:scale(1.3);pointer-events:none;}
 #pp-scr-call .pp-call-bg.no-img,#pp-scr-callend .pp-call-bg.no-img{filter:none;transform:none;background:radial-gradient(120% 90% at 50% 0%,#2a2a33,#08080b 70%)!important;}
 #pp-scr-call .pp-call-bg::after,#pp-scr-callend .pp-call-bg::after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,10,18,.30) 0%,rgba(10,10,18,.55) 55%,rgba(10,10,18,.82) 100%);}
 
-/* input bar */
 .pp-img-btn{flex-shrink:0;width:36px;height:36px;border-radius:50%;border:none;background:var(--pp-bg3);color:var(--pp-txt);cursor:pointer;display:flex;align-items:center;justify-content:center;}
 .pp-img-btn:active{transform:scale(.88);}
 .pp-stop{background:#ff453a!important;}
 .pp-stop svg{width:16px;height:16px;}
 
-/* หัวอ้างอิง + วาร์ป */
 .pp-reply-head{border-left:3px solid rgba(255,255,255,.5);padding:2px 0 4px 8px;margin:-2px 0 5px;opacity:.9;cursor:pointer;}
 .pp-brow.in .pp-reply-head{border-left-color:var(--pp-accent);}
 .pp-reply-head-label{font-size:10px;font-weight:700;opacity:.75;margin-bottom:1px;}
@@ -3244,13 +3229,11 @@ function injectCSS() {
 .pp-warp-hl{animation:pp-warp 1.6s ease;}
 @keyframes pp-warp{0%,100%{background:transparent}30%{background:rgba(10,132,255,.18);border-radius:12px}}
 
-/* รูปในแชท */
 .pp-bubble-img{padding:4px!important;overflow:hidden;}
 .pp-img-msg{border-radius:14px;overflow:hidden;background:rgba(0,0,0,.2);min-width:120px;min-height:80px;display:flex;}
 .pp-img-thumb{max-width:220px;width:100%;height:auto;display:block;border-radius:14px;object-fit:cover;}
 .pp-img-cap{font-size:14px;line-height:1.35;padding:6px 8px 2px;}
 
-/* voice */
 .pp-bubble-voice{padding:8px 12px!important;}
 .pp-voice{display:flex;align-items:center;gap:8px;cursor:pointer;min-width:130px;}
 .pp-voice-play{width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,.25);display:flex;align-items:center;justify-content:center;flex-shrink:0;}
@@ -3266,7 +3249,6 @@ function injectCSS() {
 .pp-voice-ov-inner span.show{opacity:1;transform:none;}
 .pp-voice-ov-close{position:absolute;top:16px;right:16px;width:34px;height:34px;border-radius:50%;border:none;background:rgba(255,255,255,.18);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;}
 
-/* สายในเธรด */
 .pp-callmsg{display:flex;align-items:center;gap:10px;padding:9px 14px;border-radius:18px;max-width:100%;cursor:pointer;}
 .pp-callmsg.out{background:var(--pp-mybub,var(--pp-accent));color:var(--pp-mytext,#fff);border-bottom-right-radius:6px;}
 .pp-callmsg.in{background:var(--pp-bub-in);color:var(--pp-txt);border-bottom-left-radius:6px;}
@@ -3278,19 +3260,18 @@ function injectCSS() {
 .pp-callmsg.missed .pp-callmsg-title{color:#ff453a;}
 .pp-callmsg-sub{font-size:12px;opacity:.7;}
 
-/* ★ shared post card */
-.pp-bubble-shared{padding:0!important;background:transparent!important;overflow:visible;}
+.pp-bubble-shared{padding:0!important;background:transparent!important;overflow:visible;position:relative;}
 .pp-shared-card{background:var(--pp-bg3);border:1px solid var(--pp-sep);border-radius:14px;overflow:hidden;max-width:250px;cursor:pointer;}
 .pp-shared-top{display:flex;align-items:center;gap:8px;padding:8px 10px 4px;}
 .pp-shared-av{width:26px;height:26px;border-radius:50%;object-fit:cover;flex-shrink:0;}
 .pp-shared-name{font-size:12px;font-weight:700;color:var(--pp-txt);}
 .pp-shared-tag{margin-left:auto;font-size:10px;color:var(--pp-txt3);}
-.pp-shared-title{font-size:13px;font-weight:600;padding:0 10px;color:var(--pp-txt);}
 .pp-shared-text{font-size:13px;line-height:1.4;padding:2px 10px 8px;color:var(--pp-txt);}
 .pp-shared-img{width:100%;height:130px;background:#000 center/cover no-repeat;background-color:var(--pp-sep);}
 .pp-shared-gone{padding:14px;font-size:13px;color:var(--pp-txt3);text-align:center;}
+.pp-shared-del{position:absolute;top:-8px;right:-8px;width:24px;height:24px;border-radius:50%;border:none;background:#ff453a;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;z-index:2;box-shadow:0 2px 8px rgba(0,0,0,.4);}
+.pp-shared-del svg{width:13px;height:13px;}
 
-/* persona list */
 .pp-user-persona-list{display:flex;flex-direction:column;gap:6px;}
 .pp-persona-opt{display:flex;align-items:center;gap:10px;width:100%;background:var(--pp-bg3);border:1.5px solid transparent;border-radius:14px;padding:10px 14px;color:var(--pp-txt);font-size:14px;cursor:pointer;text-align:left;}
 .pp-persona-opt.on{border-color:var(--pp-accent);}
@@ -3300,7 +3281,6 @@ function injectCSS() {
 
 .pp-loadmore{display:flex;justify-content:center;padding:6px 0 10px;}
 
-/* Feed */
 .pp-feed-tabs{display:flex;flex-shrink:0;border-bottom:.5px solid var(--pp-sep);}
 .pp-feed-tab{flex:1;background:none;border:none;color:var(--pp-txt3);font-size:15px;font-weight:600;padding:12px 0;cursor:pointer;border-bottom:2px solid transparent;}
 .pp-feed-tab.on{color:var(--pp-txt);border-bottom-color:var(--pp-accent);}
@@ -3324,7 +3304,6 @@ function injectCSS() {
 .pp-post-name{font-size:14px;font-weight:700;color:var(--pp-txt);}
 .pp-post-age{font-size:11px;color:var(--pp-txt3);}
 .pp-post-more{background:none;border:none;color:var(--pp-txt3);cursor:pointer;padding:4px;}
-.pp-post-title{font-size:15px;font-weight:700;color:var(--pp-txt);margin-bottom:4px;cursor:pointer;}
 .pp-post-text{font-size:15px;line-height:1.5;color:var(--pp-txt);white-space:pre-wrap;word-break:break-word;cursor:pointer;margin-bottom:8px;}
 .pp-post-img{width:100%;aspect-ratio:1/1;border-radius:14px;background:#000 center/cover no-repeat;background-color:var(--pp-bg3);margin-bottom:8px;}
 .pp-post-actions{display:flex;gap:20px;align-items:center;}
@@ -3336,7 +3315,6 @@ function injectCSS() {
 .pp-cmt-head{font-size:13px;font-weight:700;color:var(--pp-txt3);padding:12px 16px 4px;}
 .pp-cmt{display:flex;gap:10px;padding:8px 16px;}
 .pp-cmt.child{padding-left:44px;}
-.pp-cmt.child::before{content:'';position:absolute;}
 .pp-cmt-av{width:30px;height:30px;border-radius:50%;object-fit:cover;background:var(--pp-bg3);flex-shrink:0;}
 .pp-cmt-body{flex:1;min-width:0;}
 .pp-cmt-bubble{background:var(--pp-bg3);border-radius:14px;padding:8px 12px;}
@@ -3351,11 +3329,8 @@ function injectCSS() {
 .pp-cmt-like.on{color:#ff375f;}
 .pp-fab-inpage{position:absolute;right:16px;bottom:74px;width:52px;height:52px;border-radius:50%;border:none;background:var(--pp-accent);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;box-shadow:0 6px 20px rgba(0,0,0,.4);z-index:50;}
 .pp-fab-inpage:active{transform:scale(.9);}
-
-/* ★ สร้างโพสต์ */
 .pp-newpost-img-wrap{margin-bottom:8px;}
 
-/* ปฏิทิน */
 .pp-period-body{flex:1;overflow-y:auto;padding:16px;}
 .pp-period-status{margin-bottom:14px;}
 .pp-period-badge{background:var(--pp-bg3);border-radius:14px;padding:12px 16px;font-size:15px;color:var(--pp-txt);text-align:center;}
@@ -3372,7 +3347,6 @@ function injectCSS() {
 .pp-cal-cell.on{background:linear-gradient(160deg,#ff5e8a,#ff375f);color:#fff;font-weight:600;}
 .pp-period-hint{font-size:12px;color:var(--pp-txt3);line-height:1.5;margin-top:16px;text-align:center;}
 
-/* Story viewer */
 #pp-story-viewer{position:absolute;inset:0;z-index:800;background:#000;overflow:hidden;}
 .pp-sv-bars{position:absolute;top:8px;left:8px;right:8px;display:flex;gap:4px;z-index:3;}
 .pp-sv-bar{flex:1;height:3px;border-radius:2px;background:rgba(255,255,255,.3);overflow:hidden;}
@@ -3427,7 +3401,6 @@ window.PP_LOADED = 'parsed';
                 registerSettingsPanel();
                 startClock();
                 refreshUserAvatar();
-                // ★ ดักฟังแชทหลัก (ทาง A) — parse คีย์เมื่อบทหลักตอบ
                 try {
                     const c = ctx();
                     if (c && c.eventSource && c.event_types) {
