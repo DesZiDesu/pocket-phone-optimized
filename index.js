@@ -1405,7 +1405,7 @@ function browHTML(m, idx, grouped, tail, groupMode) {
         inner = `<div class="pp-voice" data-voiceidx="${idx}"><span class="pp-voice-play">${ICON.play}</span><span class="pp-voice-wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span><span class="pp-voice-dur">${esc(fmtDur(m.dur))}</span></div>`;
     } else if (m.type === 'sharedpost') {
         extraClass = ' pp-bubble-shared';
-        inner = sharedPostCardHTML(m);
+        inner = sharedPostCardHTML(m, idx);
     } else {
         inner = esc(m.text);
     }
