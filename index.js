@@ -7,7 +7,7 @@
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 4 ท่อน
 
-const PP_VERSION = '1.0.0';
+const PP_VERSION = '1.1.0';
 const MODULE_NAME = 'pocket-phone';
 
 function ctx() {
@@ -353,6 +353,14 @@ const DEFAULTS = {
  // ── ★ 1.0.0 : กระเป๋าเงินแยกตามรูทแชท ──
  walletPerChat: false,        // เปิด = ยอดเงิน/ประวัติแยกตามแชท ST
  walletRoutes: {},            // routeKey -> {balance, history, botWallets}
+
+ // ── ★ 1.1.0 : strict one-request engine ──
+ singleRequestMode: true,     // hard cap: no automatic retry / no hidden follow-up generation
+ autoSyncEnabled: true,       // piggyback one phone update batch on the normal ST reply
+ syncReceipts: true,          // show and retain applied/noop/missing/invalid confirmation
+ syncMaxEvents: 8,            // protect the phone from runaway model output
+ lastSyncReceipt: null,       // {status, applied, ignored, detail, ts}
+ syncStats: { turns: 0, applied: 0, noop: 0, missing: 0, invalid: 0 },
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -1047,6 +1055,15 @@ async function ppCaptionViaSlash() {
 }
 /** ไล่ 3 ชั้น · คืน '' ถ้าไม่ได้ → ผู้เรียกต้องถามให้พิมพ์เอง */
 async function captionImageAI(dataUrl) {
+ // In strict mode choose the first available route and never cascade into a
+ // second paid caption request after a failure.
+ if (getCfg().singleRequestMode !== false) {
+  ppDetect();
+  if (PP_CAP.multimodal) return await ppCaptionViaContext(dataUrl);
+  if (typeof window.getMultimodalCaption === 'function') return await ppCaptionViaGlobal(dataUrl);
+  if (PP_CAP.slash) return await ppCaptionViaSlash();
+  return '';
+ }
  let cap = await ppCaptionViaContext(dataUrl);
  if (cap) return cap;
  cap = await ppCaptionViaGlobal(dataUrl);
@@ -1695,6 +1712,15 @@ window.PP_DIAG = function () {
  logToStory: cfg.logToStory, wrapMode: cfg.logWrapMode,
  logMinor: cfg.logMinorActions,
  queued: ppLogCount(), stamps: (cfg.logStamps || []).length,
+ '-- ONE-REQUEST SYNC (1.1.0) --': '',
+ singleRequestMode: cfg.singleRequestMode !== false,
+ autoSyncEnabled: cfg.autoSyncEnabled !== false,
+ syncMaxEvents: cfg.syncMaxEvents || 8,
+ lastSync: ppSyncReceiptLabel(cfg.lastSyncReceipt),
+ syncTurns: (cfg.syncStats || {}).turns || 0,
+ syncAppliedTurns: (cfg.syncStats || {}).applied || 0,
+ syncMissingTurns: (cfg.syncStats || {}).missing || 0,
+ syncInvalidTurns: (cfg.syncStats || {}).invalid || 0,
  '-- DATA --': '',
  contacts: getContacts().length, groups: getGroups().length,
  threads: Object.keys(cfg.threads || {}).length,
@@ -7077,6 +7103,15 @@ function renderPhoneSettings() {
 
  <div class="pp-sec-label">รวมจักรวาล</div>
  <div class="pp-card">
+ <div class="pp-cell"><span class="pp-cell-lb">โหมดหนึ่งคำขอเท่านั้น</span>
+ <label class="pp-switch"><input type="checkbox" id="pp-set-singlecall"${cfg.singleRequestMode !== false ? ' checked' : ''}><span></span></label></div>
+ <div class="pp-cell"><span class="pp-cell-lb">อัปเดตมือถืออัตโนมัติจากคำตอบหลัก</span>
+ <label class="pp-switch"><input type="checkbox" id="pp-set-autosync"${cfg.autoSyncEnabled !== false ? ' checked' : ''}><span></span></label></div>
+ <div class="pp-cell"><span class="pp-cell-lb">แจ้งผลการซิงค์ทุกเทิร์น</span>
+ <label class="pp-switch"><input type="checkbox" id="pp-set-syncreceipt"${cfg.syncReceipts !== false ? ' checked' : ''}><span></span></label></div>
+ <div class="pp-cell"><span class="pp-cell-lb">เหตุการณ์มือถือสูงสุดต่อคำตอบ</span>
+ <input class="pp-num" type="number" id="pp-set-syncmax" min="1" max="20" value="${cfg.syncMaxEvents || 8}"></div>
+ ${cfg.lastSyncReceipt ? `<div class="pp-cell"><span class="pp-cell-lb">ผลซิงค์ล่าสุด</span><span class="pp-cell-val">${esc(ppSyncReceiptLabel(cfg.lastSyncReceipt))}</span></div>` : ''}
  <div class="pp-cell"><span class="pp-cell-lb">บอท/NPC ทักข้ามแชท</span>
  <label class="pp-switch"><input type="checkbox" id="pp-set-universe"${cfg.sharedUniverse ? ' checked' : ''}><span></span></label></div>
  <div class="pp-cell"><span class="pp-cell-lb">มีผลต่อโรลเพลย์หลัก</span>
@@ -7090,7 +7125,7 @@ function renderPhoneSettings() {
  ${[0, 1, 2, 3, 5, 8].map(n => `<option value="${n}"${(cfg.keyKeepTurns || 0) === n ? ' selected' : ''}>${n === 0 ? 'ลบทันที (ประหยัดสุด)' : n + ' เทิร์น'}</option>`).join('')}
  </select></div>
  </div>
- <div class="pp-hint">เปิด "มีผลต่อโรลเพลย์หลัก" แล้วบทหลักจะพ่นคีย์ [PP_CALL/MSG/PAY/EARN/FOLLOW] ให้มือถือรับได้ และบริบทบทหลักจะเข้า prompt ในมือถือ</div>
+ <div class="pp-hint">โหมดหนึ่งคำขอจะใช้คำตอบโรลเพลย์ปกติคำขอเดียวเพื่ออัปเดตแชทกลุ่ม ข้อความ โทร ฟีด สตอรี่ กระเป๋าเงิน และสถานะพร้อมกัน ไม่มีการ retry ลับ หากโมเดลไม่ส่งชุดซิงค์ ระบบจะแจ้งว่า "ไม่พบชุดซิงค์" แทนการยิง API ซ้ำ</div>
 
  <div class="pp-sec-label">${ICON.trend} ชื่อเสียงและคนแปลกหน้า</div>
  <div class="pp-card">
@@ -7315,7 +7350,9 @@ async function genOnce(prompt) {
 }
 async function genWithRetry(prompt, tries) {
  let lastErr = null;
- const n = tries || 3;
+ // Strict mode means exactly one provider request. A retry is another quota unit,
+ // so failures are surfaced to the user instead of being spent silently.
+ const n = getCfg().singleRequestMode !== false ? 1 : (tries || 3);
  for (let t = 0; t < n; t++) {
  if (ppGenAbort || ppFeedGenAbort) return '';
  try { const raw = await genOnce(prompt); if (cleanReply(raw)) { ppTrackTokens(prompt, raw); return raw; } }
@@ -7570,7 +7607,9 @@ async function ppGenerateReply() {
  renderContactList(); updateHomeWidgets();
  if (produced.length) { pushNotif(c.id, 'msg', produced[0]); islandNotify(c, produced[0]); } else islandCollapse();
  }
- if (mentioned) setTimeout(() => universeInterject(mentioned), 1600);
+ // universeInterject performs another provider call. Strict mode relies on the
+ // main-response sync batch instead so one user action cannot spend twice.
+ if (mentioned && getCfg().singleRequestMode === false) setTimeout(() => universeInterject(mentioned), 1600);
  }
  }
 }
@@ -7587,18 +7626,13 @@ async function ppGroupGenerate() {
  ppGeneratingId = g.id;
  ppGenAbort = false;
  showGenControls(true);
- let any = false, failCount = 0;
+ let any = false, failed = false;
  try {
  const un = getUserDisplayName();
  const rp = getCfg().universeAffectsRP ? mainChatRecap(10) : '';
  const order = g.replyMode === 'one' ? [members[Math.floor(Math.random() * members.length)]] : members.slice();
- for (const c of order) {
- if (ppGenAbort) break;
- try {
- if (ppViewing(g.id)) { document.querySelector('#pp-msgs .pp-regen-row')?.remove(); showTyping(dname(c)); }
- islandTyping(c);
- const persona = getEffectivePersona(c.id);
- const period = periodPromptNote(c.id);
+ if (ppViewing(g.id)) { document.querySelector('#pp-msgs .pp-regen-row')?.remove(); showTyping('สมาชิกกลุ่ม'); }
+ islandStatus('สมาชิกกลุ่มกำลังตอบ…');
  const th = getThread(g.id).slice(-HIST_LIMIT);
  const hist = th.map(m => {
  const who = m.from === 'me' ? un : (m.senderName || '?');
@@ -7608,58 +7642,64 @@ async function ppGroupGenerate() {
  if (m.type === 'voice') return `${who}: (voice) ${m.text}`;
  return `${who}: ${m.text || msgPreview(m)}`;
  }).join('\n');
- const others = members.filter(x => x.id !== c.id).map(dname);
+ const profiles = order.map(c => {
+ const persona = getEffectivePersona(c.id);
+ const period = periodPromptNote(c.id);
+ return `- ${dname(c)}: ${persona ? persona.replace(/\s+/g, ' ').slice(0, 420) : '(use the character card already in context)'}${period ? `; private context: ${period}` : ''}`;
+ }).join('\n');
  const prompt = [
- `[Group chat "${g.name}" — you are strictly ${dname(c)}. Members: ${members.map(dname).join(', ')} and ${un}.]`,
- persona ? `You ARE this character. Stay fully in persona: ${persona}` : null,
+ `[Group chat "${g.name}". Generate the selected members together in ONE response. Members: ${members.map(dname).join(', ')} and ${un}.]`,
+ `Selected responders and personas:\n${profiles}`,
  g.warnNote ? `Group rules/notes: ${g.warnNote}` : null,
- g.knowEachOther ? `You KNOW the other members (${others.join(', ')}) and may talk to them.` : `You mostly focus on ${un}; do not deeply interact with other members.`,
+ g.knowEachOther ? `They know each other and may naturally respond to one another.` : `They do not know one another; each responds mainly to ${un}.`,
  rp ? `Ongoing story context:\n${rp}` : null,
- period ? `Important — ${period}` : null,
  hist ? `\n<history>\n${hist}\n</history>` : null,
- `\nReply as ${dname(c)} with 1-2 short chat lines. Put EVERY line inside double quotes " ".`,
- `Same language (Thai). Output ONLY quoted chat lines. No planning, no narration, no asterisks.`,
- `If a poll is present and you'd vote, add a final line exactly: [POLL] option text`,
+ `Each selected responder may send 0-2 short lines. Format every message EXACTLY: [CharacterName] "message"`,
+ `A member may vote with: [POLL CharacterName] option text`,
+ `Use only these responder names: ${order.map(dname).join(', ')}. Same language as the chat (Thai when Thai).`,
+ `No planning, narration, actions, emoji, or asterisks. Output only formatted message/vote lines.`,
  ].filter(Boolean).join('\n');
- const raw = await genWithRetry(prompt, 3);
- if (ppGenAbort) { hideTyping(); break; }
- const lines = spokenOrFallback(raw, 2);
+ const raw = await genWithRetry(prompt, 1);
  hideTyping();
- if (!lines.length) { failCount++; continue; }
- // โหวตโพล
- const pm = raw.match(/\[POLL\]\s*(.+)$/im);
- if (pm) {
- const want = stripEmoji(pm[1].trim().replace(/["“”„«»「」『']/g, '')).toLowerCase();
+ if (ppGenAbort) return;
+ const counts = {};
+ for (const row of String(raw || '').split(/\n+/).map(x => x.trim()).filter(Boolean)) {
+ const poll = row.match(/^\[POLL\s+([^\]]+)\]\s*(.+)$/i);
+ if (poll) {
+ const voter = order.find(x => dname(x) === poll[1].trim()) || order.find(x => poll[1].includes(dname(x)) || dname(x).includes(poll[1]));
+ if (!voter) continue;
+ const want = stripEmoji(poll[2].trim().replace(/["“”„«»「」『']/g, '')).toLowerCase();
  const th2 = getThread(g.id);
  for (let i = th2.length - 1; i >= 0; i--) {
  const pmsg = th2[i];
  if (pmsg.type !== 'poll') continue;
  const opt = (pmsg.options || []).find(o => String(o.text).toLowerCase().includes(want) || want.includes(String(o.text).toLowerCase()));
- if (opt) { opt.votes = (opt.votes || []).filter(v => v !== c.id); opt.votes.push(c.id); saveCfg(); }
+ if (opt) { opt.votes = (opt.votes || []).filter(v => v !== voter.id); opt.votes.push(voter.id); saveCfg(); }
  break;
  }
+ continue;
  }
- for (const ln of lines) {
- if (ppGenAbort) break;
- await new Promise(r => setTimeout(r, 300 + Math.random() * 300));
+ const mm = row.match(/^\[([^\]]+)\]\s*(.+)$/);
+ if (!mm) continue;
+ const c = order.find(x => dname(x) === mm[1].trim()) || order.find(x => mm[1].includes(dname(x)) || dname(x).includes(mm[1]));
+ if (!c || (counts[c.id] || 0) >= 2) continue;
+ const spoken = extractSpoken(mm[2]);
+ const ln = spoken.length ? spoken[0] : stripEmoji(cleanReply(mm[2]).replace(/^["'“”‘’„«»「」『』]+|["'“”‘’„«»「」『』]+$/g, '')).trim();
+ if (!ln || looksLikeThought(ln)) continue;
+ counts[c.id] = (counts[c.id] || 0) + 1;
+ await new Promise(r => setTimeout(r, 220 + Math.random() * 220));
  pushThreadMsg(g.id, { from: 'them', sender: c.id, senderName: dname(c), text: ln });
  any = true;
  if (ppViewing(g.id)) renderThread();
  }
- } catch (e) {
- failCount++;
- hideTyping();
- console.warn('[pocket-phone] group member gen failed', dname(c), e);
- }
- }
- } catch (e) { console.error('[pocket-phone] group gen', e); }
+ } catch (e) { failed = true; console.error('[pocket-phone] group gen', e); }
  finally {
  ppGeneratingId = null;
  showGenControls(false);
  hideTyping();
  if (g.cooldownSec) ppGroupCooldownUntil = Date.now() + g.cooldownSec * 1000;
  if (ppGenAbort) ppToast('หยุดแล้ว');
- else if (!any) ppToast(failCount ? 'สมาชิกยังไม่ตอบ ลองอีกครั้ง' : 'ไม่มีการตอบ');
+ else if (!any) ppToast(failed ? 'เชื่อมต่อไม่ได้ — ไม่ยิงซ้ำเพื่อประหยัดโควตา' : 'สมาชิกยังไม่ตอบ');
  if (ppViewing(g.id)) { renderThread(); islandCollapse(); }
  else {
  if (any) {
@@ -7901,21 +7941,282 @@ async function ppPostGenerate(onlyIds) {
 }
 
 // ══════════════════════════════════════════════════════════
-// BRIDGE — interceptor + parse [PP_*]
+// ★ 1.1.0 ONE-REQUEST PHONE SYNC
+// The normal SillyTavern reply carries one hidden JSON batch. Applying it is
+// entirely local: it never calls generateQuietPrompt or any provider endpoint.
+// ══════════════════════════════════════════════════════════
+const PP_SYNC_START_RX = /<!--\s*PP_SYNC\b|\[PP_SYNC\]/i;
+const PP_SYNC_DONE_RX = /<!--\s*PP_SYNC_DONE\b/i;
+let ppHandledMainObjects = new WeakSet();
+
+function ppSyncReceiptLabel(r) {
+ if (!r) return 'ยังไม่มีข้อมูล';
+ if (r.status === 'applied') return `สำเร็จ ${r.applied || 0} รายการ`;
+ if (r.status === 'noop') return 'สำเร็จ · ไม่มีการเปลี่ยนแปลง';
+ if (r.status === 'missing') return 'ไม่พบชุดซิงค์';
+ if (r.status === 'invalid') return 'ชุดซิงค์ไม่ถูกต้อง';
+ return String(r.status || 'ไม่ทราบผล');
+}
+function ppRecordSyncReceipt(status, applied, ignored, detail) {
+ const cfg = getCfg();
+ const r = { status, applied: applied || 0, ignored: ignored || 0, detail: String(detail || '').slice(0, 180), ts: Date.now() };
+ cfg.lastSyncReceipt = r;
+ if (!cfg.syncStats || typeof cfg.syncStats !== 'object') cfg.syncStats = {};
+ const s = cfg.syncStats;
+ s.turns = (s.turns || 0) + 1;
+ s[status] = (s[status] || 0) + 1;
+ saveCfg();
+ if (cfg.syncReceipts !== false) {
+  if (status === 'applied') ppToast(`Pocket Phone ซิงค์แล้ว · ${r.applied} รายการ`);
+  else if (status === 'noop') ppToast('Pocket Phone ซิงค์แล้ว · ไม่มีรายการใหม่');
+  else if (status === 'missing') ppToast('Pocket Phone: ไม่พบชุดซิงค์ · ไม่ยิง API ซ้ำ');
+  else ppToast('Pocket Phone: ชุดซิงค์ผิดรูปแบบ · ไม่ยิง API ซ้ำ');
+ }
+ console.info('[pocket-phone] sync receipt', r);
+ return r;
+}
+function ppExtractSyncBatch(text) {
+ const src = String(text || '');
+ const mm = PP_SYNC_START_RX.exec(src);
+ if (!mm) return { found: false };
+ const start = mm.index;
+ const brace = src.indexOf('{', start + mm[0].length);
+ if (brace < 0) return { found: true, start, end: Math.min(src.length, src.indexOf('\n', start) < 0 ? src.length : src.indexOf('\n', start)), error: 'missing JSON object' };
+ let depth = 0, quoted = false, escaped = false, end = -1;
+ for (let i = brace; i < src.length; i++) {
+  const ch = src[i];
+  if (quoted) {
+   if (escaped) escaped = false;
+   else if (ch === '\\') escaped = true;
+   else if (ch === '"') quoted = false;
+   continue;
+  }
+  if (ch === '"') { quoted = true; continue; }
+  if (ch === '{') depth++;
+  else if (ch === '}') {
+   depth--;
+   if (depth === 0) { end = i + 1; break; }
+  }
+ }
+ if (end < 0) return { found: true, start, end: src.length, error: 'unterminated JSON object' };
+ let markerEnd = end;
+ const tail = src.slice(end, end + 8);
+ const close = tail.match(/^\s*-->/);
+ if (close) markerEnd = end + close[0].length;
+ try {
+  const payload = JSON.parse(src.slice(brace, end));
+  return { found: true, start, end: markerEnd, payload };
+ } catch (e) {
+  return { found: true, start, end: markerEnd, error: e && e.message ? e.message : 'invalid JSON' };
+ }
+}
+function ppFinalizeSyncMarker(text, info) {
+ if (!info || !info.found) return String(text || '');
+ const src = String(text || '');
+ // Discard the payload after it is applied. Keeping only a tiny receipt avoids
+ // feeding the same JSON back to the model and prevents context growth.
+ const done = info.error ? '<!--PP_SYNC_DONE invalid-->' : '<!--PP_SYNC_DONE-->';
+ return src.slice(0, info.start) + done + src.slice(info.end);
+}
+function ppSyncTextLines(value, max) {
+ const arr = Array.isArray(value) ? value : [value];
+ return arr.map(x => stripEmoji(String(x || '').trim())).filter(Boolean).slice(0, max || 4).map(x => x.slice(0, 600));
+}
+function ppSyncFindContact(name, create) {
+ const nm = String(name || '').trim();
+ if (!nm) return null;
+ let c = getContacts().find(x => x.id === nm || dname(x) === nm)
+  || getContacts().find(x => dname(x).includes(nm) || nm.includes(dname(x)));
+ if (c || !create) return c || null;
+ const st = listStCharacters().find(x => x.name === nm);
+ c = st ? { id: st.id, name: st.name, avatar: st.avatar }
+  : { id: 'npc:' + newId(), name: nm.slice(0, 80), avatar: '', npc: true, ownerCharId: currentCharacterId() || '' };
+ getCfg().contacts.push(c);
+ saveCfg();
+ return c;
+}
+function ppSyncFindGroup(name, members) {
+ const nm = String(name || '').trim();
+ let g = getGroups().find(x => x.id === nm || x.name === nm)
+  || getGroups().find(x => nm && (x.name.includes(nm) || nm.includes(x.name)));
+ if (g || !nm) return g || null;
+ const memberIds = (Array.isArray(members) ? members : []).map(x => ppSyncFindContact(x, true)).filter(Boolean).map(x => x.id);
+ const unique = [...new Set(memberIds)];
+ if (unique.length < 2) return null;
+ g = { id: 'grp:' + newId(), name: nm.slice(0, 80), members: unique, knowEachOther: true, replyMode: 'many', cooldownSec: 0, warnNote: '' };
+ getCfg().groups.push(g);
+ saveCfg();
+ return g;
+}
+function ppSyncLatestPost(ev) {
+ if (ev && ev.postId) return findPost(String(ev.postId));
+ const posts = getFeedPosts();
+ if (ev && ev.postBy) {
+  const author = ppSyncFindContact(ev.postBy, false);
+  const aid = author ? author.id : (String(ev.postBy).toLowerCase() === 'user' ? 'user' : '');
+  if (aid) return posts.slice().reverse().find(p => p.author === aid) || null;
+ }
+ return posts.slice().reverse().find(p => p.author === 'user') || posts[posts.length - 1] || null;
+}
+function ppApplySyncEvent(ev) {
+ if (!ev || typeof ev !== 'object') return { ok: false, reason: 'not an object' };
+ const type = String(ev.type || ev.kind || '').toLowerCase().replace(/[\s-]+/g, '_');
+ const cfg = getCfg();
+ if (type === 'noop' || type === 'none') return { ok: false, noop: true };
+
+ if (type === 'dm' || type === 'message' || type === 'new_message') {
+  const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
+  const lines = ppSyncTextLines(ev.text || ev.messages, 4);
+  if (!c || !lines.length) return { ok: false, reason: 'dm target/text missing' };
+  lines.forEach(text => pushThreadMsg(c.id, { from: 'them', text }));
+  bumpUnread(c.id, lines.length); pushNotif(c.id, 'msg', lines[0]); islandNotify(c, lines[0]);
+  return { ok: true, label: `ข้อความจาก ${dname(c)}` };
+ }
+ if (type === 'group' || type === 'group_message' || type === 'groupchat') {
+  const g = ppSyncFindGroup(ev.group || ev.groupName || ev.name, ev.members);
+  const c = ppSyncFindContact(ev.from || ev.sender, true);
+  const lines = ppSyncTextLines(ev.text || ev.messages, 4);
+  if (!g || !c || !lines.length) return { ok: false, reason: 'group/sender/text missing' };
+  if (!(g.members || []).includes(c.id)) { g.members.push(c.id); saveCfg(); }
+  lines.forEach(text => pushThreadMsg(g.id, { from: 'them', sender: c.id, senderName: dname(c), text }));
+  bumpUnread(g.id, lines.length); pushNotif(g.id, 'group', `${dname(c)}: ${lines[0]}`); islandNotify({ id: g.id, name: g.name, avatar: '' }, `${dname(c)}: ${lines[0]}`);
+  return { ok: true, label: `กลุ่ม ${g.name}` };
+ }
+ if (type === 'call' || type === 'missed_call') {
+  const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
+  if (!c) return { ok: false, reason: 'call target missing' };
+  const live = type === 'call' && ev.live === true && !ppCall;
+  if (live) ppIncomingCall(c);
+  else {
+   const count = Math.max(1, Math.min(10, parseInt(ev.count, 10) || 1));
+   if (!cfg.callLog) cfg.callLog = [];
+   for (let i = 0; i < count; i++) {
+    const ts = Date.now() - (count - i) * 60000;
+    cfg.callLog.push({ cid: c.id, name: dname(c), avatar: c.avatar, chatId: ppStChatId(), startISO: new Date(ts).toISOString(), durText: 'ไม่ได้รับสาย', incoming: true, transcript: [], missed: true });
+    pushThreadMsg(c.id, { from: 'them', type: 'call', dir: 'in', missed: true, text: 'ไม่ได้รับสาย', ts });
+   }
+   bumpUnread(c.id, count); pushNotif(c.id, 'msg', `สายที่ไม่ได้รับ ${count} สาย`); islandNotify(c, `สายที่ไม่ได้รับ ${count} สาย`);
+  }
+  return { ok: true, label: live ? `สายจาก ${dname(c)}` : `สายที่ไม่ได้รับจาก ${dname(c)}` };
+ }
+ if (type === 'post' || type === 'feed_post') {
+  const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
+  const text = ppSyncTextLines(ev.text, 3).join('\n');
+  if (!c || !text) return { ok: false, reason: 'post author/text missing' };
+  const p = { id: newId(), author: c.id, kind: 'post', authorName: dname(c), text: text.slice(0, 1000), mediaKeys: [], captions: [], responders: null, knowEachOther: true, visibility: 'all', ts: Date.now(), likes: [], extraLikes: Math.max(0, parseInt(ev.likes, 10) || 0), comments: [], views: {}, saves: 0 };
+  cfg.feedPosts.push(p); pushNotif(c.id, 'feed', `${dname(c)} โพสต์ใหม่`); islandNotify(c, `${dname(c)} โพสต์ใหม่`); saveCfg();
+  return { ok: true, label: `โพสต์ของ ${dname(c)}` };
+ }
+ if (type === 'story') {
+  const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
+  const text = ppSyncTextLines(ev.text, 2).join('\n');
+  if (!c || !text) return { ok: false, reason: 'story author/text missing' };
+  cfg.stories.push({ id: newId(), author: c.id, authorName: dname(c), type: 'text', text: text.slice(0, 220), bg: STORY_BGS[Math.floor(Math.random() * STORY_BGS.length)], closeOnly: false, ts: Date.now(), likes: [], views: {}, replies: [] });
+  pushNotif(c.id, 'story', `${dname(c)} ลงสตอรี่ใหม่`); islandNotify(c, 'ลงสตอรี่ใหม่'); saveCfg();
+  return { ok: true, label: `สตอรี่ของ ${dname(c)}` };
+ }
+ if (type === 'comment') {
+  const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
+  const p = ppSyncLatestPost(ev);
+  const text = ppSyncTextLines(ev.text, 1)[0];
+  if (!c || !p || !text) return { ok: false, reason: 'comment author/post/text missing' };
+  if (!p.comments) p.comments = [];
+  p.comments.push({ id: newId(), author: c.id, text, ts: Date.now(), likes: [], extraLikes: Math.max(0, parseInt(ev.likes, 10) || 0), parentId: null });
+  pushNotif(c.id, 'comment', `${dname(c)} คอมเมนต์: ${text.slice(0, 40)}`); saveCfg();
+  return { ok: true, label: `คอมเมนต์จาก ${dname(c)}` };
+ }
+ if (type === 'wallet' || type === 'payment' || type === 'money') {
+  const amount = Math.abs(parseInt(ev.amount, 10) || 0);
+  if (!amount) return { ok: false, reason: 'wallet amount missing' };
+  const c = ppSyncFindContact(ev.from || ev.contact || ev.name, !!(ev.from || ev.contact || ev.name));
+  const incoming = !ev.direction || /^(in|income|earn|received)$/i.test(String(ev.direction));
+  const note = String(ev.reason || ev.note || 'จากเนื้อเรื่อง').slice(0, 160);
+  adjustUserBalance(incoming ? amount : -amount);
+  pushWalletHistory(incoming ? 'in' : 'out', amount, c ? c.id : null, c ? dname(c) : (incoming ? 'รายได้' : 'รายจ่าย'), note);
+  if (c) {
+   pushThreadMsg(c.id, { from: incoming ? 'them' : 'me', type: 'transfer', amount, note, status: 'accepted' });
+   pushNotif(c.id, 'wallet', `${incoming ? 'ได้รับโอน' : 'โอนออก'} ${fmtMoney(amount)}`);
+  }
+  return { ok: true, label: `${incoming ? 'รับ' : 'จ่าย'} ${fmtMoney(amount)}` };
+ }
+ if (type === 'follow') {
+  const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
+  if (!c) return { ok: false, reason: 'follow target missing' };
+  if (!cfg.followers.includes(c.id)) cfg.followers.push(c.id);
+  pushNotif(c.id, 'follow', `${dname(c)} เริ่มติดตามคุณ`); saveCfg();
+  return { ok: true, label: `${dname(c)} ติดตาม` };
+ }
+ if (type === 'note' || type === 'status') {
+  const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
+  const text = ppSyncTextLines(ev.text, 1)[0];
+  if (!c || !text) return { ok: false, reason: 'note author/text missing' };
+  setBotNote(c.id, text);
+  return { ok: true, label: `สเตตัสของ ${dname(c)}` };
+ }
+ return { ok: false, reason: `unsupported type: ${type || 'missing'}` };
+}
+function ppApplySyncBatch(payload) {
+ if (!payload || typeof payload !== 'object' || !Array.isArray(payload.events)) return { valid: false, applied: 0, ignored: 0, detail: 'events must be an array' };
+ const limit = Math.max(1, Math.min(20, getCfg().syncMaxEvents || 8));
+ const events = payload.events.slice(0, limit);
+ let applied = 0, ignored = Math.max(0, payload.events.length - events.length);
+ const labels = [], errors = [];
+ events.forEach(ev => {
+  try {
+   const r = ppApplySyncEvent(ev);
+   if (r.ok) { applied++; if (r.label) labels.push(r.label); }
+   else if (!r.noop) { ignored++; if (r.reason) errors.push(r.reason); }
+  } catch (e) { ignored++; errors.push(e && e.message ? e.message : 'event failed'); }
+ });
+ saveCfg();
+ renderContactList(); updateHomeWidgets();
+ if (ppCurrentScreen === 'feed') renderFeed();
+ else if (ppCurrentScreen === 'newsapp') renderNewsApp();
+ if (ppCurrentScreen === 'wallet') renderWallet();
+ if (ppCurrentScreen === 'chat') renderThread();
+ return { valid: true, applied, ignored, detail: (labels.length ? labels.join(', ') : errors.join(', ')).slice(0, 180) };
+}
+function ppSyncInventory() {
+ const contacts = getContacts().filter(c => !isBlocked(c.id)).slice(0, 30).map(dname);
+ const groups = getGroups().slice(0, 15).map(g => `${g.name}(${groupMemberContacts(g).map(dname).join(',')})`);
+ const posts = getFeedPosts().slice(-3).map(p => `${p.id}:${postAuthorLabel(p)}:${String(p.text || '[image]').replace(/\s+/g, ' ').slice(0, 70)}`);
+ return `Contacts=${contacts.join(', ') || 'none'}\nGroups=${groups.join('; ') || 'none'}\nRecentPosts=${posts.join('; ') || 'none'}`;
+}
+
+// ══════════════════════════════════════════════════════════
+// BRIDGE — interceptor + parse [PP_*] compatibility keys
 // ══════════════════════════════════════════════════════════
 window.ppGenInterceptor = function (chat, contextSize, abort, type) {
  try {
  const cfg = getCfg();
- if (!cfg.universeAffectsRP) return;
  if (!Array.isArray(chat)) return;
  const un = getUserDisplayName();
- const instr =
- `[PhoneBridge — never describe these in prose, append on own line ONLY when the story truly calls for it. Put | between name and text. ` +
- `<span class="pp-hk" style="display:none">[PP_MSG:Name|text]</span> a contact texts ${un}; <span class="pp-hk" style="display:none">[PP_CALL:Name]</span> calls now; <span class="pp-hk" style="display:none">[PP_PAY:Name|amount|reason]</span> pays ${un}; <span class="pp-hk" style="display:none">[PP_EARN:amount|reason]</span>. ` +
- `Backdated: <span class="pp-hk" style="display:none">[PP_MISSEDCALL:Name|count|when]</span>; <span class="pp-hk" style="display:none">[PP_PASTMSG:Name|when|msg1||msg2]</span>; <span class="pp-hk" style="display:none">[PP_PASTCALL:Name|when|minutes|line1||line2]</span>; <span class="pp-hk" style="display:none">[PP_PASTPAY:Name|when|amount|out or in|reason]</span> (out=${un} paid, in=paid ${un}). when=เมื่อคืน/N ชม./N วัน.` +
- (getCfg().allowBotReplyOnPhone ? ` <span class="pp-hk" style="display:none">[PP_REPLY:Name|text]</span> if you physically use ${un}'s phone.` : '') +
- ` Otherwise output nothing extra.]`;
- chat.push({ is_user: false, is_system: true, name: 'PocketPhone', mes: instr });
+ if (cfg.autoSyncEnabled !== false) {
+  const actionBody = ppBuildLogBody();
+  const actionAlreadyStamped = chat.slice(-4).some(m => String((m && m.mes) || '').includes('Pocket Phone — สิ่งที่'));
+  const instr = [
+   `[Pocket Phone one-request sync. This is part of the SAME normal response; never request or simulate another model call.]`,
+   `After your normal roleplay response, ALWAYS append exactly one HTML comment on one line in this form:`,
+   `<!--PP_SYNC {"v":1,"events":[]}-->`,
+   `Put every phone consequence caused or strongly implied by this story turn into that single events array. If nothing changes, keep events empty. The comment is machine data: do not mention it in prose and do not put it in a code fence.`,
+   `Allowed compact events:`,
+   `{"type":"dm","from":"Name","text":["message"]}`,
+   `{"type":"group","group":"Existing Group","from":"Name","text":["message"]}`,
+   `{"type":"group","group":"New Group","members":["A","B"],"from":"A","text":["message"]}`,
+   `{"type":"call","from":"Name","live":true} or {"type":"missed_call","from":"Name","count":1}`,
+   `{"type":"post","author":"Name","text":"post","likes":0}; {"type":"story","author":"Name","text":"story"}; {"type":"comment","author":"Name","postId":"id","text":"comment"}`,
+   `{"type":"wallet","from":"Name","direction":"in","amount":100,"reason":"why"}; {"type":"follow","from":"Name"}; {"type":"note","author":"Name","text":"status"}`,
+   `Use only valid JSON with double quotes. Maximum ${Math.max(1, Math.min(20, cfg.syncMaxEvents || 8))} events. Do not invent a phone event every turn; an empty confirmed batch is correct.`,
+   `When the roleplay talks about an existing group chat receiving activity, create a group event so the phone really gains the unread message on this response.`,
+   ppSyncInventory(),
+   (actionBody && !actionAlreadyStamped) ? `Unprocessed actions ${un} performed on the phone (already happened; react naturally and account for them in this same response):\n${actionBody}` : null,
+  ].filter(Boolean).join('\n');
+  chat.push({ is_user: false, is_system: true, name: 'PocketPhoneSync', mes: instr });
+ } else if (cfg.universeAffectsRP) {
+  // Legacy compatibility when automatic JSON sync is intentionally disabled.
+  const instr = `[PhoneBridge — append only when the story truly calls for it: [PP_MSG:Name|text], [PP_CALL:Name], [PP_PAY:Name|amount|reason], [PP_EARN:amount|reason]. Otherwise output nothing extra.]`;
+  chat.push({ is_user: false, is_system: true, name: 'PocketPhone', mes: instr });
+ }
 
  // ★ สถานะประจำเดือน — ฉีดสดทุกเทิร์น ไม่เขียนลงไฟล์
  const period = periodPromptNote();
@@ -8009,12 +8310,35 @@ async function ppSweepOldKeys() {
 }
 async function ppHandleMainChatMessage() {
  try {
- if (!getCfg().universeAffectsRP) return;
+ const cfgNow = getCfg();
+ if (!cfgNow.universeAffectsRP && cfgNow.autoSyncEnabled === false) return;
  const c = ctx();
  if (!c || !Array.isArray(c.chat) || !c.chat.length) return;
  const last = c.chat[c.chat.length - 1];
  if (!last || last.is_user) return;
- const mes = String(last.mes || '');
+ if (last && typeof last === 'object' && ppHandledMainObjects.has(last)) return;
+ if (last && typeof last === 'object') ppHandledMainObjects.add(last);
+ let mes = String(last.mes || '');
+ let syncChanged = false;
+
+ // Apply the hidden batch locally before the legacy key parser. No API call is
+ // made here. Mark it DONE in the saved chat so reloads cannot replay money,
+ // messages, or notifications.
+ const syncInfo = ppExtractSyncBatch(mes);
+ if (syncInfo.found) {
+  if (syncInfo.error) ppRecordSyncReceipt('invalid', 0, 0, syncInfo.error);
+  else {
+   const result = ppApplySyncBatch(syncInfo.payload);
+   if (!result.valid) ppRecordSyncReceipt('invalid', 0, result.ignored, result.detail);
+   else if (result.applied > 0) ppRecordSyncReceipt('applied', result.applied, result.ignored, result.detail);
+   else ppRecordSyncReceipt('noop', 0, result.ignored, result.detail);
+  }
+  mes = ppFinalizeSyncMarker(mes, syncInfo);
+  last.mes = mes;
+  syncChanged = true;
+ } else if (cfgNow.autoSyncEnabled !== false && !PP_SYNC_DONE_RX.test(mes)) {
+  ppRecordSyncReceipt('missing', 0, 0, 'model omitted the required batch');
+ }
  // มี "คีย์ดิบ" (ยังไม่ถูกห่อ) ไหม = ยังไม่เคยประมวลผลข้อความนี้
  const withoutWrapped = mes.replace(PP_WRAP_RE_G, '');
  PP_KEY_RE_G.lastIndex = 0;
@@ -8022,6 +8346,13 @@ async function ppHandleMainChatMessage() {
  PP_KEY_RE_G.lastIndex = 0;
  if (!hasUnwrapped) {
  // คีย์ถูกห่อครบแล้ว (หรือไม่มีคีย์) → ไฟล์ซ่อนให้เอง แค่เก็บกวาดคีย์เก่าแล้วจบ (กันยิงข้อความซ้ำ)
+ if (syncChanged) {
+  const idx = c.chat.length - 1;
+  const dom = document.querySelector(`#chat .mes[mesid="${idx}"] .mes_text`);
+  ppDetect();
+  if (dom && PP_CAP.msgFormat) dom.innerHTML = c.messageFormatting(last.mes, last.name, false, false, idx);
+  await ppSaveChatNow();
+ }
  ppSweepOldKeys();
  updateHomeWidgets();
  return;
@@ -9042,6 +9373,10 @@ function injectPhone() {
  'pp-set-logmax': () => { cfg.logMaxEvents = Math.max(5, Math.min(200, parseInt(v, 10) || 60)); },
  'pp-set-universe': () => { cfg.sharedUniverse = v; },
  'pp-set-affectrp': () => { cfg.universeAffectsRP = v; },
+ 'pp-set-singlecall': () => { cfg.singleRequestMode = v; },
+ 'pp-set-autosync': () => { cfg.autoSyncEnabled = v; if (v) cfg.universeAffectsRP = true; },
+ 'pp-set-syncreceipt': () => { cfg.syncReceipts = v; },
+ 'pp-set-syncmax': () => { cfg.syncMaxEvents = Math.max(1, Math.min(20, parseInt(v, 10) || 8)); },
  'pp-set-botreply': () => { cfg.allowBotReplyOnPhone = v; },
  'pp-set-strictnpc': () => { cfg.strictNpcScope = v; renderContactList(); },
  'pp-set-keykeep': () => { cfg.keyKeepTurns = Math.max(0, Math.min(20, parseInt(v, 10) || 0)); },
