@@ -1,13 +1,13 @@
-// pocket-phone/index.js — 0.9.9 — ท่อน 1/4 (ต้นไฟล์ → จบ helper ทั้งหมด)
-// ★ หัวใจ: Action Log — เก็บทุกการกระทำของผู้ใช้ในมือถือ แล้วแทรกเป็น <!-- -->
-// เข้า .mes ของข้อความผู้ใช้จริง ตอน MESSAGE_SENT
-// → บอทเห็น · จอไม่แสดง · กดแก้ไขเห็น · ปิดเว็บไม่หาย · ทำ n ครั้ง ส่ง 1 ครั้ง
+// pocket-phone/index.js — 1.2.0
+// ★ Action Log stays in extension state and enters the next generation as an
+// ephemeral system prompt. Main replies return a plain JSON frame that is
+// consumed and removed—no HTML comments, hidden divs, or extra model request.
 // ★ เลิกเดา API: ppDetect() ตรวจ runtime แล้วเลือกทางที่ใช้ได้ · PP_DIAG() ดูผล
 // ★ ไม่มีอิโมจิใน UI · ไม่มีกดค้าง · ไม่มีมิเตอร์ความสัมพันธ์ · ไม่มีข้อความหายเอง
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 4 ท่อน
 
-const PP_VERSION = '1.1.0';
+const PP_VERSION = '1.2.0';
 const MODULE_NAME = 'pocket-phone';
 
 function ctx() {
@@ -298,7 +298,7 @@ const DEFAULTS = {
  logToStory: true, // เปิด/ปิดการแทรกเข้าบทหลัก
  logIdleNote: false, // แทรกบรรทัด "ไม่ได้แตะมือถือ" เมื่อไม่มีอะไร
  logMinorActions: false, // ติดดาว/ปิดเสียง/เก็บถาวร เข้าบล็อกด้วยไหม
- logWrapMode: 'comment', // comment | hidden
+ logWrapMode: 'prompt', // legacy setting; 1.2+ injects actions as an ephemeral system prompt
  logMaxEvents: 60,
  logStamps: [],
 
@@ -361,6 +361,7 @@ const DEFAULTS = {
  syncMaxEvents: 8,            // protect the phone from runaway model output
  lastSyncReceipt: null,       // {status, applied, ignored, detail, ts}
  syncStats: { turns: 0, applied: 0, noop: 0, missing: 0, invalid: 0 },
+ processedMainSync: [],       // stable fingerprints prevent replay after the data frame is removed
 };
 const LS_MIRROR = 'pp_cfg_mirror';
 
@@ -405,6 +406,7 @@ function cleanReply(t) {
  s = s.replace(new RegExp(`^\\s*(?:${_THOUGHT_TAGS})\\s*[:：].*$`, 'gim'), '');
  s = s.replace(/\(\([\s\S]*?\)\)/g, '');
  s = s.replace(/<!--[\s\S]*?-->/g, ''); // ★ กันบอท echo Action Log กลับมา
+ s = s.replace(/\[\[POCKET_PHONE_SYNC_V2\]\][\s\S]*?\[\[\/POCKET_PHONE_SYNC_V2\]\]/gi, '');
  s = s.replace(/<\/?[a-z][^>]*>/gi, '');
  return s.trim();
 }
@@ -631,6 +633,7 @@ function ymdLabel(s) {
 // ══════════════════════════════════════════════════════════
 // ★★★ ACTION LOG — หัวใจของ 0.9.9 ★★★
 // ══════════════════════════════════════════════════════════
+// Legacy-only cleanup. New action data is never written into chat messages.
 const PP_MARK_RX = /<!--\s*Pocket Phone[\s\S]*?-->/g;
 const PP_HIDDEN_RX = /<div\s+data-pp-log[\s\S]*?<\/div>/g;
 
@@ -717,88 +720,30 @@ function ppBuildLogBody() {
  if (!parts.length) return '';
  return parts.join('\n\n');
 }
-function ppWrapLogBlock(body) {
- const cfg = getCfg();
- const un = getUserDisplayName();
- const head = `[Pocket Phone — สิ่งที่ ${un} เพิ่งทำจริงบนมือถือเมื่อครู่นี้ ถือเป็นเหตุการณ์ที่ "เกิดขึ้นแล้วในโลกของเรื่อง" ตัวละครที่เกี่ยวข้องรับรู้และตอบสนองได้ตามธรรมชาติทันที ให้ react ได้เลยโดยไม่ต้องรอคำสั่งเพิ่ม]`;
- if (cfg.logWrapMode === 'hidden') {
- return `<div data-pp-log style="display:none">${head}\n\n${body}</div>`;
- }
- return `<!-- ${head}\n\n${body}\n-->`;
-}
 function ppLogPlainSummary() { return ppBuildLogBody() || ''; }
 
-function ppMsgFingerprint(msg, idx) {
- const raw = String((msg && msg.mes) || '');
- const clean = raw.replace(PP_MARK_RX, '').replace(PP_HIDDEN_RX, '').trim();
- return `${idx}|${clean.length}|${clean.slice(0, 24)}|${clean.slice(-16)}`;
-}
-
 /**
- * ★★ แทรก Action Log เข้า .mes ของข้อความผู้ใช้ล่าสุด ★★
- * เรียกจาก MESSAGE_SENT (ท่อน 4/4)
- * - เขียนไฟล์แชทจริง → ถาวร กดแก้ไขเห็น เข้า prompt เพราะ prompt สร้างจาก chat
- * - ไม่ re-render DOM → จอที่วาดแล้วไม่เปลี่ยน ผู้ใช้เห็นแต่ข้อความตัวเอง
- * - ล้างคิวหลังสำเร็จ → ทำ n ครั้ง ส่ง 1 ครั้ง
+ * Compatibility console hook. Since 1.2, phone actions stay in local state and
+ * are injected by ppGenInterceptor for one generation only. Nothing is written
+ * into the user's message and the queue is cleared only after a reply arrives.
  */
 async function ppStampUserMessage() {
  try {
  const cfg = getCfg();
  if (!cfg.logToStory) return { ok: false, reason: 'ปิดการแทรก' };
-
- const c = ctx();
- ppDetect();
- if (!c || !Array.isArray(c.chat) || !c.chat.length) return { ok: false, reason: 'ไม่มี chat' };
-
- let idx = -1;
- for (let i = c.chat.length - 1; i >= 0; i--) {
- const m = c.chat[i];
- if (m && m.is_user && !m.is_system) { idx = i; break; }
- }
- if (idx < 0) return { ok: false, reason: 'ไม่พบข้อความผู้ใช้' };
-
- const msg = c.chat[idx];
- const base = String(msg.mes || '');
-
- // กันซ้ำ 1: มีบล็อกอยู่แล้ว
- PP_MARK_RX.lastIndex = 0;
- if (PP_MARK_RX.test(base) || base.includes('data-pp-log')) {
- PP_MARK_RX.lastIndex = 0;
- return { ok: false, reason: 'แสตมป์แล้ว' };
- }
- PP_MARK_RX.lastIndex = 0;
-
- // กันซ้ำ 2: fingerprint
- const fp = ppMsgFingerprint(msg, idx);
- if (!Array.isArray(cfg.logStamps)) cfg.logStamps = [];
- if (cfg.logStamps.includes(fp)) return { ok: false, reason: 'fingerprint ซ้ำ' };
-
  let body = ppBuildLogBody();
  if (!body) {
  if (!cfg.logIdleNote) return { ok: false, reason: 'ไม่มีกิจกรรม' };
  body = `[อื่น ๆ]\n- ${getUserDisplayName()} ไม่ได้แตะมือถือช่วงนี้`;
  }
-
- msg.mes = ppWrapLogBlock(body) + '\n\n' + base;
-
- cfg.logStamps.push(fp);
- if (cfg.logStamps.length > 40) cfg.logStamps = cfg.logStamps.slice(-40);
-
- const sentCount = (cfg.actionLog || []).length;
- cfg.actionLog = []; // ★ ล้างคิว
- saveCfg();
- ppUpdateLogBadge();
-
- const how = await ppSaveChatNow();
- console.log(`[pocket-phone] แทรก Action Log เข้าข้อความ #${idx} (${sentCount} เหตุการณ์) save:${how}`);
- return { ok: true, idx, sentCount, saveMethod: how };
+ return { ok: true, queued: (cfg.actionLog || []).length, transport: 'ephemeral-system-prompt', preview: body };
  } catch (e) {
  console.error('[pocket-phone] ppStampUserMessage', e);
  return { ok: false, reason: e.message };
  }
 }
 
-/** ★ ล้างบล็อกออกจากทั้งแชท (เผื่อเทสแล้วไม่ชอบ) */
+/** ล้างบล็อก legacy รุ่นเก่าออกจากทั้งแชท */
 async function ppStripAll() {
  try {
  const c = ctx();
@@ -6838,12 +6783,12 @@ const HELPER_SECTIONS = [
  ['กระเป๋าเงิน', 'โอน/ขอ/เติม/หัก เงินได้ · การโอนขึ้นเป็นการ์ดในแชท · กราฟ 7 วันดูรายรับรายจ่าย · ตั้งลิมิตต่อวันและสกุลเงินได้'],
  ['ประจําเดือน', 'แตะวันในปฏิทินเพื่อทําเครื่องหมาย แตะซ้ําเพื่อบันทึกอาการ · ระบบคํานวณรอบเฉลี่ยและคาดการณ์ · เปิด/ปิดให้บอทรับรู้ได้ที่แท็บความเป็นส่วนตัว'],
  ['สติกเกอร์', 'ตั้งค่า › สติกเกอร์ · เพิ่มชุดด้วยลิงก์รูป+ป้ายชื่อ · นําเข้า/ส่งออกเป็นไฟล์ JSON ได้ · บอทส่งได้โดยพิมพ์ [STICKER] ตามชื่อป้าย'],
- ['บันทึกกิจกรรม', 'ทุกอย่างที่คุณทําบนมือถือถูกเก็บเป็นคิว แล้วแทรกเข้าข้อความโรลเพลย์ครั้งถัดไปที่คุณส่ง เพื่อให้บอทในเนื้อเรื่องรับรู้ · ดู/ล้างคิวได้ในตั้งค่า'],
+ ['บันทึกกิจกรรม', 'ทุกอย่างที่คุณทําบนมือถือถูกเก็บเป็นคิว แล้วส่งเป็น system prompt ชั่วคราวในการเจนโรลเพลย์ครั้งถัดไป โดยไม่แก้ข้อความของคุณ · ดู/ล้างคิวได้ในตั้งค่า'],
  ['NPC สร้างเอง', 'หน้าเพิ่มคนคุย › "สร้าง NPC เอง" · ตั้งชื่อ บุคลิก และเลือกตัวละครหลักเป็นต้นแบบได้ · ใช้ตัวอักษรตัวแรกเป็นรูป'],
  ['ความเป็นส่วนตัว', 'ล็อคบัญชีให้บอทต้องขอติดตามก่อน · ตั้งค่าใครเห็นโพสต์ได้ · จัดการเพื่อนสนิท/จํากัด/บล็อก'],
  ['Dynamic Island', 'แถบบนสุดแสดงสถานะสด เช่น กําลังเจน กําลังโทร สายเข้า และข้อความใหม่ · เปิด/ปิดได้ในตั้งค่า'],
  ['เชื่อมกับเนื้อเรื่อง', 'เปิด "แทรกกิจกรรมเข้าบทหลัก" เพื่อให้บอทรู้สิ่งที่คุณทํา · เปิด "มีผลต่อโรลเพลย์หลัก" เพื่อให้บทหลักสั่งมือถือได้ (โทร/ข้อความ/โอน) และมือถือยึดบุคลิกจากโรล'],
- ['แก้ปัญหาเบื้องต้น', 'บล็อกโผล่ในแชท: ตั้งค่า › ล้างบล็อกออกจากแชท หรือเรียก PP_STRIP_ALL() · เจนไม่ออก: PP_DIAG() ดูว่าเจอ API ไหม · รูปไม่ขึ้น: พื้นที่เก็บข้อมูลอาจเต็ม ลองรูปเล็กลง'],
+ ['แก้ปัญหาเบื้องต้น', 'ซิงค์ไม่มา: ดูใบยืนยันผลในตั้งค่าและตรวจว่าเปิดอัปเดตอัตโนมัติ · เจนไม่ออก: PP_DIAG() ดูว่าเจอ API ไหม · รูปไม่ขึ้น: พื้นที่เก็บข้อมูลอาจเต็ม ลองรูปเล็กลง'],
 ];
 function renderHelper() {
  const body = document.getElementById('pp-helper-body');
@@ -7086,19 +7031,12 @@ function renderPhoneSettings() {
  <label class="pp-switch"><input type="checkbox" id="pp-set-logidle"${cfg.logIdleNote ? ' checked' : ''}><span></span></label></div>
  <div class="pp-cell"><span class="pp-cell-lb">บันทึกเรื่องส่วนตัวด้วย (ติดดาว/ปิดเสียง/เก็บถาวร)</span>
  <label class="pp-switch"><input type="checkbox" id="pp-set-logminor"${cfg.logMinorActions ? ' checked' : ''}><span></span></label></div>
- <div class="pp-cell"><span class="pp-cell-lb">วิธีซ่อนบล็อก</span>
- <select class="pp-sel" id="pp-set-logwrap">
- <option value="comment"${cfg.logWrapMode === 'comment' ? ' selected' : ''}>HTML comment</option>
- <option value="hidden"${cfg.logWrapMode === 'hidden' ? ' selected' : ''}>div ซ่อน</option>
- </select></div>
  <div class="pp-cell"><span class="pp-cell-lb">จำนวนเหตุการณ์สูงสุดต่อการส่ง</span>
  <input class="pp-num" type="number" id="pp-set-logmax" min="5" max="200" value="${cfg.logMaxEvents || 60}"></div>
  </div>
- <div class="pp-hint">บล็อกจะแทรกไว้ก่อนข้อความที่คุณพิมพ์ ตอนกดส่งโรลเพลย์ · บอทเห็น จอไม่แสดง กดแก้ไขข้อความจะเห็น · ส่งครั้งเดียวแล้วล้างคิว<br>
- ถ้าเจอว่าบล็อกโผล่ให้เห็น ลองสลับเป็น "div ซ่อน" หรือเรียก PP_STRIP_ALL() ใน console</div>
+ <div class="pp-hint">กิจกรรมจะเข้าเป็น system prompt ชั่วคราวเฉพาะตอนเจน ไม่ถูกเขียนต่อท้ายข้อความ ไม่ใช้ HTML comment/div และจะล้างเฉพาะรายการที่ส่งสำเร็จเมื่อคำตอบมาถึง</div>
  <div class="pp-btn-row">
- <button class="pp-btn" id="pp-set-logpreview">ดูตัวอย่างบล็อก</button>
- <button class="pp-btn danger" id="pp-set-logstrip">ล้างบล็อกออกจากทั้งแชท</button>
+ <button class="pp-btn" id="pp-set-logpreview">ดูตัวอย่างข้อมูลที่จะส่ง</button>
  </div>
 
  <div class="pp-sec-label">รวมจักรวาล</div>
@@ -7120,12 +7058,8 @@ function renderPhoneSettings() {
  <label class="pp-switch"><input type="checkbox" id="pp-set-botreply"${cfg.allowBotReplyOnPhone ? ' checked' : ''}><span></span></label></div>
  <div class="pp-cell"><span class="pp-cell-lb">โฟกัสเข้ม: ซ่อน NPC ที่ไม่ผูกตัวละคร</span>
  <label class="pp-switch"><input type="checkbox" id="pp-set-strictnpc"${cfg.strictNpcScope ? ' checked' : ''}><span></span></label></div>
- <div class="pp-cell"><span class="pp-cell-lb">คงคีย์ให้บอทย้อนอ่าน (เทิร์นล่าสุด)</span>
- <select class="pp-sel" id="pp-set-keykeep">
- ${[0, 1, 2, 3, 5, 8].map(n => `<option value="${n}"${(cfg.keyKeepTurns || 0) === n ? ' selected' : ''}>${n === 0 ? 'ลบทันที (ประหยัดสุด)' : n + ' เทิร์น'}</option>`).join('')}
- </select></div>
  </div>
- <div class="pp-hint">โหมดหนึ่งคำขอจะใช้คำตอบโรลเพลย์ปกติคำขอเดียวเพื่ออัปเดตแชทกลุ่ม ข้อความ โทร ฟีด สตอรี่ กระเป๋าเงิน และสถานะพร้อมกัน ไม่มีการ retry ลับ หากโมเดลไม่ส่งชุดซิงค์ ระบบจะแจ้งว่า "ไม่พบชุดซิงค์" แทนการยิง API ซ้ำ</div>
+ <div class="pp-hint">โหมดหนึ่งคำขอใช้ data frame แบบข้อความธรรมดาในคำตอบโรลเพลย์เดียว แล้วลบ frame ออกจากแชทหลังประมวลผล รองรับข่าว ข้อความ/ไฟล์แนบ กลุ่ม โทร ฟีด โพล สตอรี่ คอมเมนต์ ปฏิกิริยา รีโพสต์ กระเป๋าเงิน ผู้ติดตาม และสเตตัสพร้อมกัน โดยไม่ retry ลับ</div>
 
  <div class="pp-sec-label">${ICON.trend} ชื่อเสียงและคนแปลกหน้า</div>
  <div class="pp-card">
@@ -7302,7 +7236,7 @@ function renderLogView() {
  <div class="pp-card"><div class="pp-cell">
  <span class="pp-cell-lb">${ICON.compose} เหตุการณ์ค้างคิว</span>
  <span class="pp-cell-val">${events.length} รายการ</span></div></div>
- <div class="pp-hint">รายการเหล่านี้จะถูกแทรกเข้าข้อความโรลเพลย์ครั้งถัดไปที่คุณกดส่ง แล้วล้างคิวทันที · แตะวงกลมหน้ารายการเพื่อเลือกแล้วลบเป็นบางรายการ</div>
+ <div class="pp-hint">รายการเหล่านี้จะเข้า system prompt ชั่วคราวในการเจนโรลเพลย์ครั้งถัดไป แล้วล้างเฉพาะเมื่อคำตอบมาถึง · ข้อความที่คุณพิมพ์จะไม่ถูกแก้ไข · แตะวงกลมเพื่อเลือกแล้วลบ</div>
  ${selCount ? `<div class="pp-btn-row" style="margin:0 0 8px">
  <button class="pp-btn danger" id="pp-log-delsel">${ICON.trash} ลบที่เลือก (${selCount})</button>
  <button class="pp-btn" id="pp-log-clearsel">ยกเลิกเลือก</button>
@@ -7317,7 +7251,7 @@ function renderLogView() {
  </div>
  </div>
  </div>`).join('')}</div>` : `<div class="pp-empty">${ICON.check}<br>ไม่มีอะไรค้างคิว</div>`}
- <div class="pp-sec-label">${ICON.eye} บล็อกที่จะแทรก</div>
+ <div class="pp-sec-label">${ICON.eye} ข้อมูลที่จะส่งชั่วคราว</div>
  <div class="pp-promptbox">${esc(ppPreviewLog())}</div>`;
 }
 
@@ -7941,13 +7875,16 @@ async function ppPostGenerate(onlyIds) {
 }
 
 // ══════════════════════════════════════════════════════════
-// ★ 1.1.0 ONE-REQUEST PHONE SYNC
-// The normal SillyTavern reply carries one hidden JSON batch. Applying it is
-// entirely local: it never calls generateQuietPrompt or any provider endpoint.
+// ★ 1.2.0 ONE-REQUEST PHONE SYNC
+// The normal SillyTavern reply carries one plain delimited JSON frame. The
+// extension consumes and removes it; no HTML comments/divs and no extra API call.
 // ══════════════════════════════════════════════════════════
-const PP_SYNC_START_RX = /<!--\s*PP_SYNC\b|\[PP_SYNC\]/i;
-const PP_SYNC_DONE_RX = /<!--\s*PP_SYNC_DONE\b/i;
-let ppHandledMainObjects = new WeakSet();
+const PP_SYNC_FRAME_START = '[[POCKET_PHONE_SYNC_V2]]';
+const PP_SYNC_FRAME_END = '[[/POCKET_PHONE_SYNC_V2]]';
+const PP_LEGACY_SYNC_START_RX = /<!--\s*PP_SYNC\b|\[PP_SYNC\]/i;
+const PP_LEGACY_SYNC_DONE_G = /<!--\s*PP_SYNC_DONE(?:\s+invalid)?\s*-->/gi;
+let ppPendingActionIds = null;
+let ppBridgeExpected = false;
 
 function ppSyncReceiptLabel(r) {
  if (!r) return 'ยังไม่มีข้อมูล';
@@ -7975,14 +7912,10 @@ function ppRecordSyncReceipt(status, applied, ignored, detail) {
  console.info('[pocket-phone] sync receipt', r);
  return r;
 }
-function ppExtractSyncBatch(text) {
- const src = String(text || '');
- const mm = PP_SYNC_START_RX.exec(src);
- if (!mm) return { found: false };
- const start = mm.index;
- const brace = src.indexOf('{', start + mm[0].length);
- if (brace < 0) return { found: true, start, end: Math.min(src.length, src.indexOf('\n', start) < 0 ? src.length : src.indexOf('\n', start)), error: 'missing JSON object' };
- let depth = 0, quoted = false, escaped = false, end = -1;
+function ppExtractJsonObject(src, searchFrom) {
+ const brace = src.indexOf('{', searchFrom);
+ if (brace < 0) return { error: 'missing JSON object', jsonEnd: searchFrom };
+ let depth = 0, quoted = false, escaped = false;
  for (let i = brace; i < src.length; i++) {
   const ch = src[i];
   if (quoted) {
@@ -7993,31 +7926,80 @@ function ppExtractSyncBatch(text) {
   }
   if (ch === '"') { quoted = true; continue; }
   if (ch === '{') depth++;
-  else if (ch === '}') {
-   depth--;
-   if (depth === 0) { end = i + 1; break; }
+  else if (ch === '}' && --depth === 0) {
+   try { return { payload: JSON.parse(src.slice(brace, i + 1)), jsonEnd: i + 1 }; }
+   catch (e) { return { error: e && e.message ? e.message : 'invalid JSON', jsonEnd: i + 1 }; }
   }
  }
- if (end < 0) return { found: true, start, end: src.length, error: 'unterminated JSON object' };
- let markerEnd = end;
- const tail = src.slice(end, end + 8);
- const close = tail.match(/^\s*-->/);
- if (close) markerEnd = end + close[0].length;
- try {
-  const payload = JSON.parse(src.slice(brace, end));
-  return { found: true, start, end: markerEnd, payload };
- } catch (e) {
-  return { found: true, start, end: markerEnd, error: e && e.message ? e.message : 'invalid JSON' };
+ return { error: 'unterminated JSON object', jsonEnd: src.length };
+}
+function ppExtractSyncBatch(text) {
+ const src = String(text || '');
+ const start = src.indexOf(PP_SYNC_FRAME_START);
+ if (start >= 0) {
+  const bodyStart = start + PP_SYNC_FRAME_START.length;
+  const close = src.indexOf(PP_SYNC_FRAME_END, bodyStart);
+  if (close < 0) return { found: true, start, end: src.length, error: 'unterminated Pocket Phone frame' };
+  const body = src.slice(bodyStart, close).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  try { return { found: true, start, end: close + PP_SYNC_FRAME_END.length, payload: JSON.parse(body), protocol: 'frame-v2' }; }
+  catch (e) { return { found: true, start, end: close + PP_SYNC_FRAME_END.length, error: e && e.message ? e.message : 'invalid JSON', protocol: 'frame-v2' }; }
  }
+ // Read old chats once so upgrading cannot strand pending legacy data.
+ const mm = PP_LEGACY_SYNC_START_RX.exec(src);
+ if (!mm) return { found: false };
+ const parsed = ppExtractJsonObject(src, mm.index + mm[0].length);
+ let markerEnd = parsed.jsonEnd;
+ const tail = src.slice(markerEnd, markerEnd + 8).match(/^\s*-->/);
+ if (tail) markerEnd += tail[0].length;
+ return { found: true, start: mm.index, end: markerEnd, payload: parsed.payload, error: parsed.error, protocol: 'legacy' };
 }
 function ppFinalizeSyncMarker(text, info) {
- if (!info || !info.found) return String(text || '');
+ if (!info || !info.found) return String(text || '').replace(PP_LEGACY_SYNC_DONE_G, '').trim();
  const src = String(text || '');
- // Discard the payload after it is applied. Keeping only a tiny receipt avoids
- // feeding the same JSON back to the model and prevents context growth.
- const done = info.error ? '<!--PP_SYNC_DONE invalid-->' : '<!--PP_SYNC_DONE-->';
- return src.slice(0, info.start) + done + src.slice(info.end);
+ const before = src.slice(0, info.start).replace(/[ \t]+$/, '').replace(/\n{3,}$/, '\n\n');
+ const after = src.slice(info.end).replace(/^[ \t]*(?:\r?\n)?/, '');
+ return (before + (before && after ? '\n' : '') + after).replace(PP_LEGACY_SYNC_DONE_G, '').trim();
 }
+function ppStableHash(value) {
+ const s = String(value || '');
+ let h = 2166136261;
+ for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+ return (h >>> 0).toString(36);
+}
+function ppMainSyncKey(message, idx, cleanedText) {
+ const route = walletRouteKey();
+ const stamp = message && (message.send_date || message.gen_started || message.id || message.extra?.api) || '';
+ return `${route}|${idx}|${stamp}|${ppStableHash(cleanedText)}`;
+}
+function ppWasMainSyncHandled(key) {
+ const arr = getCfg().processedMainSync;
+ return Array.isArray(arr) && arr.includes(key);
+}
+function ppRememberMainSync(key) {
+ const cfg = getCfg();
+ if (!Array.isArray(cfg.processedMainSync)) cfg.processedMainSync = [];
+ if (!cfg.processedMainSync.includes(key)) cfg.processedMainSync.push(key);
+ if (cfg.processedMainSync.length > 160) cfg.processedMainSync = cfg.processedMainSync.slice(-160);
+ saveCfg();
+}
+function ppPrepareActionBatch() {
+ const cfg = getCfg();
+ if (!cfg.logToStory) return null;
+ const max = Math.max(5, cfg.logMaxEvents || 60);
+ const events = (cfg.actionLog || []).slice(-max);
+ let body = ppBuildLogBody();
+ if (!body && cfg.logIdleNote) body = `[อื่น ๆ]\n- ${getUserDisplayName()} ไม่ได้แตะมือถือช่วงนี้`;
+ return body ? { ids: events.map(x => x.id), body } : null;
+}
+function ppCommitActionBatch() {
+ if (!ppPendingActionIds) return;
+ const cfg = getCfg();
+ const sent = new Set(ppPendingActionIds);
+ cfg.actionLog = (cfg.actionLog || []).filter(x => !sent.has(x.id));
+ ppPendingActionIds = null;
+ saveCfg(); ppUpdateLogBadge();
+}
+function ppCancelActionBatch() { ppPendingActionIds = null; }
 function ppSyncTextLines(value, max) {
  const arr = Array.isArray(value) ? value : [value];
  return arr.map(x => stripEmoji(String(x || '').trim())).filter(Boolean).slice(0, max || 4).map(x => x.slice(0, 600));
@@ -8064,46 +8046,100 @@ function ppApplySyncEvent(ev) {
  const cfg = getCfg();
  if (type === 'noop' || type === 'none') return { ok: false, noop: true };
 
- if (type === 'dm' || type === 'message' || type === 'new_message') {
+ if (type === 'contact' || type === 'new_contact') {
+  const c = ppSyncFindContact(ev.name || ev.from || ev.contact, true);
+  return c ? { ok: true, label: `เพิ่ม ${dname(c)}` } : { ok: false, reason: 'contact name missing' };
+ }
+ if (['dm', 'message', 'new_message', 'voice', 'sticker', 'location', 'gift', 'poll', 'unsend'].includes(type)) {
   const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
-  const lines = ppSyncTextLines(ev.text || ev.messages, 4);
-  if (!c || !lines.length) return { ok: false, reason: 'dm target/text missing' };
-  lines.forEach(text => pushThreadMsg(c.id, { from: 'them', text }));
-  bumpUnread(c.id, lines.length); pushNotif(c.id, 'msg', lines[0]); islandNotify(c, lines[0]);
-  return { ok: true, label: `ข้อความจาก ${dname(c)}` };
+  if (!c) return { ok: false, reason: 'message target missing' };
+  if (type === 'unsend') {
+   const th = getThread(c.id);
+   const old = th.slice().reverse().find(x => x.from === 'them' && !x.unsent && x.type !== 'call' && x.type !== 'transfer');
+   if (!old) return { ok: false, reason: 'no message to unsend' };
+   old.unsent = true; old.origText = old.text || old.label || ''; saveCfg();
+   return { ok: true, label: `${dname(c)} ยกเลิกข้อความ` };
+  }
+  const made = [];
+  if (type === 'voice') {
+   const text = ppSyncTextLines(ev.text, 1)[0];
+   if (text) made.push({ from: 'them', type: 'voice', text, dur: Math.min(60, Math.max(2, parseInt(ev.duration, 10) || Math.round(text.length / 8))) });
+  } else if (type === 'sticker') {
+   const found = findStickerByLabel(String(ev.label || ev.text || '').trim());
+   const url = String(ev.url || found?.url || '').trim();
+   if (url) made.push({ from: 'them', type: 'sticker', url, label: String(ev.label || found?.label || '').slice(0, 80) });
+  } else if (type === 'location') {
+   const place = String(ev.place || ev.text || '').trim();
+   if (place) made.push({ from: 'them', type: 'location', place: place.slice(0, 120), note: String(ev.note || '').slice(0, 160) });
+  } else if (type === 'gift') {
+   const giftName = String(ev.gift || ev.name || ev.text || '').trim();
+   if (giftName) made.push({ from: 'them', type: 'gift', giftName: giftName.slice(0, 100) });
+  } else if (type === 'poll') {
+   const question = String(ev.question || ev.text || '').trim();
+   const options = (Array.isArray(ev.options) ? ev.options : []).map(x => String(x).trim()).filter(Boolean).slice(0, 6);
+   if (question && options.length >= 2) made.push({ from: 'them', type: 'poll', question: question.slice(0, 180), options: options.map(text => ({ text: text.slice(0, 100), votes: [] })) });
+  } else {
+   ppSyncTextLines(ev.text || ev.messages, 4).forEach(text => made.push({ from: 'them', text }));
+  }
+  if (!made.length) return { ok: false, reason: `${type} content missing` };
+  made.forEach(x => pushThreadMsg(c.id, x));
+  bumpUnread(c.id, made.length); pushNotif(c.id, 'msg', made[0].text || `[${type}]`); islandNotify(c, made[0].text || `[${type}]`);
+  return { ok: true, label: `${type} จาก ${dname(c)}` };
+ }
+ if (type === 'story_reply') {
+  const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
+  const text = ppSyncTextLines(ev.text, 2)[0];
+  const story = (cfg.stories || []).find(x => x.id === ev.storyId) || (cfg.stories || []).slice().reverse().find(x => x.author === 'user');
+  if (!c || !text || !story) return { ok: false, reason: 'story reply target/text missing' };
+  pushThreadMsg(c.id, { from: 'them', text, replyTo: { kind: 'story', text: story.text || '[story]' } });
+  if (!story.replies) story.replies = []; story.replies.push({ cid: c.id, text, ts: Date.now() });
+  bumpUnread(c.id, 1); pushNotif(c.id, 'story', `${dname(c)} ตอบสตอรี่`); islandNotify(c, text);
+  return { ok: true, label: `ตอบสตอรี่จาก ${dname(c)}` };
  }
  if (type === 'group' || type === 'group_message' || type === 'groupchat') {
   const g = ppSyncFindGroup(ev.group || ev.groupName || ev.name, ev.members);
   const c = ppSyncFindContact(ev.from || ev.sender, true);
   const lines = ppSyncTextLines(ev.text || ev.messages, 4);
   if (!g || !c || !lines.length) return { ok: false, reason: 'group/sender/text missing' };
-  if (!(g.members || []).includes(c.id)) { g.members.push(c.id); saveCfg(); }
+  if (!(g.members || []).includes(c.id)) g.members.push(c.id);
   lines.forEach(text => pushThreadMsg(g.id, { from: 'them', sender: c.id, senderName: dname(c), text }));
   bumpUnread(g.id, lines.length); pushNotif(g.id, 'group', `${dname(c)}: ${lines[0]}`); islandNotify({ id: g.id, name: g.name, avatar: '' }, `${dname(c)}: ${lines[0]}`);
   return { ok: true, label: `กลุ่ม ${g.name}` };
  }
- if (type === 'call' || type === 'missed_call') {
+ if (type === 'call' || type === 'missed_call' || type === 'call_log') {
   const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
   if (!c) return { ok: false, reason: 'call target missing' };
   const live = type === 'call' && ev.live === true && !ppCall;
   if (live) ppIncomingCall(c);
   else {
-   const count = Math.max(1, Math.min(10, parseInt(ev.count, 10) || 1));
+   const missed = type === 'missed_call' || ev.missed === true;
+   const count = missed ? Math.max(1, Math.min(10, parseInt(ev.count, 10) || 1)) : 1;
+   const mins = Math.max(1, Math.min(180, parseInt(ev.minutes, 10) || 1));
+   const transcript = ppSyncTextLines(ev.transcript, 10).map(text => ({ from: 'them', text }));
    if (!cfg.callLog) cfg.callLog = [];
    for (let i = 0; i < count; i++) {
     const ts = Date.now() - (count - i) * 60000;
-    cfg.callLog.push({ cid: c.id, name: dname(c), avatar: c.avatar, chatId: ppStChatId(), startISO: new Date(ts).toISOString(), durText: 'ไม่ได้รับสาย', incoming: true, transcript: [], missed: true });
-    pushThreadMsg(c.id, { from: 'them', type: 'call', dir: 'in', missed: true, text: 'ไม่ได้รับสาย', ts });
+    cfg.callLog.push({ cid: c.id, name: dname(c), avatar: c.avatar, chatId: ppStChatId(), startISO: new Date(ts).toISOString(), durText: missed ? 'ไม่ได้รับสาย' : fmtDur(mins * 60), incoming: true, transcript, missed });
+    pushThreadMsg(c.id, { from: 'them', type: 'call', dir: 'in', missed, text: missed ? 'ไม่ได้รับสาย' : `คุยกัน ${fmtDur(mins * 60)}`, ts });
    }
-   bumpUnread(c.id, count); pushNotif(c.id, 'msg', `สายที่ไม่ได้รับ ${count} สาย`); islandNotify(c, `สายที่ไม่ได้รับ ${count} สาย`);
+   bumpUnread(c.id, count); pushNotif(c.id, 'msg', missed ? `สายที่ไม่ได้รับ ${count} สาย` : `คุยสาย ${fmtDur(mins * 60)}`); islandNotify(c, missed ? `สายที่ไม่ได้รับ ${count} สาย` : `คุยสาย ${fmtDur(mins * 60)}`);
   }
-  return { ok: true, label: live ? `สายจาก ${dname(c)}` : `สายที่ไม่ได้รับจาก ${dname(c)}` };
+  return { ok: true, label: live ? `สายจาก ${dname(c)}` : `บันทึกสายจาก ${dname(c)}` };
+ }
+ if (type === 'news') {
+  const text = ppSyncTextLines(ev.text || [ev.headline, ev.body], 4).join('\n');
+  const source = String(ev.source || ev.author || 'ข่าวในโลก').trim().slice(0, 60);
+  if (!text) return { ok: false, reason: 'news text missing' };
+  cfg.feedPosts.push({ id: newId(), author: 'news', kind: 'news', newsSource: source, authorName: source, handle: source, text: text.slice(0, 1000), mediaKeys: [], captions: [], visibility: 'all', ts: Date.now(), likes: [], extraLikes: Math.max(0, parseInt(ev.likes, 10) || 0), comments: [], views: {}, saves: 0 });
+  pushNotif('news', 'feed', `${source}: ${text.split('\n')[0].slice(0, 60)}`); saveCfg();
+  return { ok: true, label: `ข่าวจาก ${source}` };
  }
  if (type === 'post' || type === 'feed_post') {
   const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
   const text = ppSyncTextLines(ev.text, 3).join('\n');
   if (!c || !text) return { ok: false, reason: 'post author/text missing' };
-  const p = { id: newId(), author: c.id, kind: 'post', authorName: dname(c), text: text.slice(0, 1000), mediaKeys: [], captions: [], responders: null, knowEachOther: true, visibility: 'all', ts: Date.now(), likes: [], extraLikes: Math.max(0, parseInt(ev.likes, 10) || 0), comments: [], views: {}, saves: 0 };
+  const poll = ev.poll && Array.isArray(ev.poll.options) ? { question: String(ev.poll.question || '').slice(0, 180), options: ev.poll.options.slice(0, 6).map(x => ({ text: String(x).slice(0, 100), votes: [] })) } : null;
+  const p = { id: newId(), author: c.id, kind: 'post', authorName: dname(c), text: text.slice(0, 1000), mediaKeys: [], captions: [], responders: null, knowEachOther: true, visibility: ['all', 'followers', 'close', 'none'].includes(ev.visibility) ? ev.visibility : 'all', closeOnly: ev.closeOnly === true, poll, question: String(ev.question || '').slice(0, 180), ts: Date.now(), likes: [], extraLikes: Math.max(0, parseInt(ev.likes, 10) || 0), comments: [], views: {}, saves: 0 };
   cfg.feedPosts.push(p); pushNotif(c.id, 'feed', `${dname(c)} โพสต์ใหม่`); islandNotify(c, `${dname(c)} โพสต์ใหม่`); saveCfg();
   return { ok: true, label: `โพสต์ของ ${dname(c)}` };
  }
@@ -8111,19 +8147,52 @@ function ppApplySyncEvent(ev) {
   const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
   const text = ppSyncTextLines(ev.text, 2).join('\n');
   if (!c || !text) return { ok: false, reason: 'story author/text missing' };
-  cfg.stories.push({ id: newId(), author: c.id, authorName: dname(c), type: 'text', text: text.slice(0, 220), bg: STORY_BGS[Math.floor(Math.random() * STORY_BGS.length)], closeOnly: false, ts: Date.now(), likes: [], views: {}, replies: [] });
+  cfg.stories.push({ id: newId(), author: c.id, authorName: dname(c), type: 'text', text: text.slice(0, 220), bg: STORY_BGS[Math.floor(Math.random() * STORY_BGS.length)], closeOnly: ev.closeOnly === true, ts: Date.now(), likes: [], views: {}, replies: [] });
   pushNotif(c.id, 'story', `${dname(c)} ลงสตอรี่ใหม่`); islandNotify(c, 'ลงสตอรี่ใหม่'); saveCfg();
   return { ok: true, label: `สตอรี่ของ ${dname(c)}` };
  }
- if (type === 'comment') {
+ if (type === 'comment' || type === 'comment_reply') {
   const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
   const p = ppSyncLatestPost(ev);
   const text = ppSyncTextLines(ev.text, 1)[0];
   if (!c || !p || !text) return { ok: false, reason: 'comment author/post/text missing' };
   if (!p.comments) p.comments = [];
-  p.comments.push({ id: newId(), author: c.id, text, ts: Date.now(), likes: [], extraLikes: Math.max(0, parseInt(ev.likes, 10) || 0), parentId: null });
+  const parent = ev.parentId || ev.replyTo;
+  const parentId = parent && p.comments.some(x => x.id === parent) ? parent : null;
+  p.comments.push({ id: newId(), author: c.id, text, ts: Date.now(), likes: [], extraLikes: Math.max(0, parseInt(ev.likes, 10) || 0), parentId });
   pushNotif(c.id, 'comment', `${dname(c)} คอมเมนต์: ${text.slice(0, 40)}`); saveCfg();
   return { ok: true, label: `คอมเมนต์จาก ${dname(c)}` };
+ }
+ if (['like', 'unlike', 'save_post', 'story_like'].includes(type)) {
+  const c = ppSyncFindContact(ev.from || ev.author || ev.name, true);
+  if (!c) return { ok: false, reason: 'reaction actor missing' };
+  if (type === 'story_like') {
+   const story = (cfg.stories || []).find(x => x.id === ev.storyId) || (cfg.stories || []).slice().reverse().find(x => x.author === 'user');
+   if (!story) return { ok: false, reason: 'story missing' };
+   if (!story.likes) story.likes = []; if (!story.likes.includes(c.id)) story.likes.push(c.id);
+   pushNotif(c.id, 'story', `${dname(c)} ถูกใจสตอรี่ของคุณ`); return { ok: true, label: `${dname(c)} ถูกใจสตอรี่` };
+  }
+  const p = ppSyncLatestPost(ev); if (!p) return { ok: false, reason: 'post missing' };
+  if (!p.likes) p.likes = [];
+  if (type === 'unlike') p.likes = p.likes.filter(x => x !== c.id);
+  else if (type === 'save_post') p.saves = (p.saves || 0) + 1;
+  else if (!p.likes.includes(c.id)) p.likes.push(c.id);
+  pushNotif(c.id, 'feed', `${dname(c)} ${type === 'save_post' ? 'บันทึก' : type === 'unlike' ? 'เลิกถูกใจ' : 'ถูกใจ'}โพสต์`);
+  return { ok: true, label: `${type} โดย ${dname(c)}` };
+ }
+ if (type === 'repost') {
+  const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
+  const src = ppSyncLatestPost(ev); if (!c || !src) return { ok: false, reason: 'repost author/post missing' };
+  const root = rootPost(src);
+  cfg.feedPosts.push({ id: newId(), author: c.id, authorName: dname(c), kind: 'post', repostOf: root.id, quote: String(ev.quote || '').slice(0, 400), text: '', mediaKeys: [], captions: [], visibility: 'all', ts: Date.now(), likes: [], extraLikes: 0, comments: [], views: {}, saves: 0 });
+  pushNotif(c.id, 'feed', `${dname(c)} รีโพสต์`); return { ok: true, label: `รีโพสต์โดย ${dname(c)}` };
+ }
+ if (type === 'poll_vote') {
+  const c = ppSyncFindContact(ev.from || ev.author || ev.name, true);
+  const p = ppSyncLatestPost(ev); const oi = Math.max(0, parseInt(ev.option, 10) || 0);
+  if (!c || !p?.poll?.options?.[oi]) return { ok: false, reason: 'poll voter/post/option missing' };
+  p.poll.options.forEach(x => { x.votes = (x.votes || []).filter(v => v !== c.id); }); p.poll.options[oi].votes.push(c.id);
+  pushNotif(c.id, 'feed', `${dname(c)} โหวตในโพล`); return { ok: true, label: `โหวตโดย ${dname(c)}` };
  }
  if (type === 'wallet' || type === 'payment' || type === 'money') {
   const amount = Math.abs(parseInt(ev.amount, 10) || 0);
@@ -8134,23 +8203,43 @@ function ppApplySyncEvent(ev) {
   adjustUserBalance(incoming ? amount : -amount);
   pushWalletHistory(incoming ? 'in' : 'out', amount, c ? c.id : null, c ? dname(c) : (incoming ? 'รายได้' : 'รายจ่าย'), note);
   if (c) {
+   setBotWallet(c.id, getBotWallet(c.id) + (incoming ? -amount : amount));
    pushThreadMsg(c.id, { from: incoming ? 'them' : 'me', type: 'transfer', amount, note, status: 'accepted' });
    pushNotif(c.id, 'wallet', `${incoming ? 'ได้รับโอน' : 'โอนออก'} ${fmtMoney(amount)}`);
   }
   return { ok: true, label: `${incoming ? 'รับ' : 'จ่าย'} ${fmtMoney(amount)}` };
  }
- if (type === 'follow') {
+ if (type === 'wallet_request' || type === 'money_request') {
+  const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
+  const amount = Math.abs(parseInt(ev.amount, 10) || 0); const note = String(ev.reason || ev.note || '').slice(0, 160);
+  if (!c || !amount) return { ok: false, reason: 'wallet request target/amount missing' };
+  const text = `ขอเงิน ${fmtMoney(amount)}${note ? ` — ${note}` : ''}`;
+  pushThreadMsg(c.id, { from: 'them', text }); bumpUnread(c.id, 1); pushNotif(c.id, 'wallet', text); islandNotify(c, text);
+  return { ok: true, label: `คำขอเงินจาก ${dname(c)}` };
+ }
+ if (type === 'follow' || type === 'follow_request') {
   const c = ppSyncFindContact(ev.from || ev.contact || ev.name, true);
   if (!c) return { ok: false, reason: 'follow target missing' };
-  if (!cfg.followers.includes(c.id)) cfg.followers.push(c.id);
-  pushNotif(c.id, 'follow', `${dname(c)} เริ่มติดตามคุณ`); saveCfg();
+  if (cfg.accountLocked || type === 'follow_request') {
+   if (!cfg.followRequests.includes(c.id) && !cfg.followers.includes(c.id)) cfg.followRequests.push(c.id);
+   pushNotif(c.id, 'follow', `${dname(c)} ขอติดตามคุณ`);
+  } else {
+   if (!cfg.followers.includes(c.id)) cfg.followers.push(c.id);
+   pushNotif(c.id, 'follow', `${dname(c)} เริ่มติดตามคุณ`);
+  }
   return { ok: true, label: `${dname(c)} ติดตาม` };
+ }
+ if (type === 'unfollow') {
+  const c = ppSyncFindContact(ev.from || ev.contact || ev.name, false);
+  if (!c) return { ok: false, reason: 'unfollow target missing' };
+  cfg.followers = (cfg.followers || []).filter(x => x !== c.id); cfg.followRequests = (cfg.followRequests || []).filter(x => x !== c.id);
+  pushNotif(c.id, 'follow', `${dname(c)} เลิกติดตามคุณ`); return { ok: true, label: `${dname(c)} เลิกติดตาม` };
  }
  if (type === 'note' || type === 'status') {
   const c = ppSyncFindContact(ev.author || ev.from || ev.name, true);
   const text = ppSyncTextLines(ev.text, 1)[0];
-  if (!c || !text) return { ok: false, reason: 'note author/text missing' };
-  setBotNote(c.id, text);
+  if (!c) return { ok: false, reason: 'note author missing' };
+  setBotNote(c.id, text || '');
   return { ok: true, label: `สเตตัสของ ${dname(c)}` };
  }
  return { ok: false, reason: `unsupported type: ${type || 'missing'}` };
@@ -8177,53 +8266,56 @@ function ppApplySyncBatch(payload) {
  return { valid: true, applied, ignored, detail: (labels.length ? labels.join(', ') : errors.join(', ')).slice(0, 180) };
 }
 function ppSyncInventory() {
- const contacts = getContacts().filter(c => !isBlocked(c.id)).slice(0, 30).map(dname);
- const groups = getGroups().slice(0, 15).map(g => `${g.name}(${groupMemberContacts(g).map(dname).join(',')})`);
- const posts = getFeedPosts().slice(-3).map(p => `${p.id}:${postAuthorLabel(p)}:${String(p.text || '[image]').replace(/\s+/g, ' ').slice(0, 70)}`);
- return `Contacts=${contacts.join(', ') || 'none'}\nGroups=${groups.join('; ') || 'none'}\nRecentPosts=${posts.join('; ') || 'none'}`;
+ const contacts = getContacts().filter(c => !isBlocked(c.id)).slice(0, 40).map(dname);
+ const groups = getGroups().slice(0, 20).map(g => `${g.name}(${groupMemberContacts(g).map(dname).join(',')})`);
+ const posts = getFeedPosts().slice(-6).map(p => `${p.id}:${p.kind}:${postAuthorLabel(p)}:${String(p.text || '[image]').replace(/\s+/g, ' ').slice(0, 90)}`);
+ const stories = liveStories().slice(-5).map(s => `${s.id}:${s.author === 'user' ? getUserDisplayName() : cname(s.author)}:${String(s.text || '[image]').slice(0, 60)}`);
+ return [`Contacts=${contacts.join(', ') || 'none'}`, `Groups=${groups.join('; ') || 'none'}`, `RecentPosts=${posts.join('; ') || 'none'}`, `LiveStories=${stories.join('; ') || 'none'}`, `UserWallet=${fmtMoney(walletBalanceGet())}`, `Account=${getCfg().accountLocked ? 'private' : 'public'}`].join('\n');
 }
 
 // ══════════════════════════════════════════════════════════
-// BRIDGE — interceptor + parse [PP_*] compatibility keys
+// BRIDGE — ephemeral prompt in, plain JSON frame out
 // ══════════════════════════════════════════════════════════
 window.ppGenInterceptor = function (chat, contextSize, abort, type) {
  try {
  const cfg = getCfg();
+ const generationType = String(type || 'normal').toLowerCase();
+ // SillyTavern runs manifest interceptors for quiet/background requests too.
+ // Pocket Phone's own generators must never receive the main-chat data frame.
+ if (['quiet', 'impersonate', 'continue'].some(x => generationType.includes(x))) {
+  ppBridgeExpected = false; ppCancelActionBatch(); return;
+ }
  if (!Array.isArray(chat)) return;
  const un = getUserDisplayName();
  if (cfg.autoSyncEnabled !== false) {
-  const actionBody = ppBuildLogBody();
-  const actionAlreadyStamped = chat.slice(-4).some(m => String((m && m.mes) || '').includes('Pocket Phone — สิ่งที่'));
+  const actionBatch = ppPrepareActionBatch();
+  ppBridgeExpected = true;
+  ppPendingActionIds = actionBatch ? actionBatch.ids : null;
   const instr = [
-   `[Pocket Phone one-request sync. This is part of the SAME normal response; never request or simulate another model call.]`,
-   `After your normal roleplay response, ALWAYS append exactly one HTML comment on one line in this form:`,
-   `<!--PP_SYNC {"v":1,"events":[]}-->`,
-   `Put every phone consequence caused or strongly implied by this story turn into that single events array. If nothing changes, keep events empty. The comment is machine data: do not mention it in prose and do not put it in a code fence.`,
-   `Allowed compact events:`,
-   `{"type":"dm","from":"Name","text":["message"]}`,
-   `{"type":"group","group":"Existing Group","from":"Name","text":["message"]}`,
-   `{"type":"group","group":"New Group","members":["A","B"],"from":"A","text":["message"]}`,
-   `{"type":"call","from":"Name","live":true} or {"type":"missed_call","from":"Name","count":1}`,
-   `{"type":"post","author":"Name","text":"post","likes":0}; {"type":"story","author":"Name","text":"story"}; {"type":"comment","author":"Name","postId":"id","text":"comment"}`,
-   `{"type":"wallet","from":"Name","direction":"in","amount":100,"reason":"why"}; {"type":"follow","from":"Name"}; {"type":"note","author":"Name","text":"status"}`,
-   `Use only valid JSON with double quotes. Maximum ${Math.max(1, Math.min(20, cfg.syncMaxEvents || 8))} events. Do not invent a phone event every turn; an empty confirmed batch is correct.`,
-   `When the roleplay talks about an existing group chat receiving activity, create a group event so the phone really gains the unread message on this response.`,
+   `[Pocket Phone v2 one-request bridge. This is part of the SAME normal response and must never trigger or imply a second model call.]`,
+   `After the normal roleplay prose, append exactly one plain data frame (not HTML, not a div, not a comment, not a code fence):`,
+   `${PP_SYNC_FRAME_START}{"v":2,"events":[]}${PP_SYNC_FRAME_END}`,
+   `The extension consumes and removes this frame from chat. Put every phone consequence caused or clearly implied by this turn in events. If none, use an empty array. Never mention the frame in prose.`,
+   `Story-driven event types supported by the phone:`,
+   `Messages: contact; dm; voice; sticker; location; gift; poll; unsend; story_reply. Common fields: from, text, label, url, place, note, question, options, storyId.`,
+   `Groups/calls: group (group, members, from, text); call (from, live); missed_call; call_log (from, minutes, transcript).`,
+   `Feed/news: news (source, headline/body or text, likes); post (author, text, likes, visibility, closeOnly, poll, question); story; comment/comment_reply (postId, parentId); like/unlike/save_post; story_like; repost; poll_vote (postId, option).`,
+   `Money/social: wallet (from, direction in|out, amount, reason); wallet_request; follow; follow_request; unfollow; note/status.`,
+   `Use valid JSON with double quotes, exact existing names/IDs from inventory when available, and no invented phone activity. Maximum ${Math.max(1, Math.min(20, cfg.syncMaxEvents || 8))} events.`,
+   `Examples: {"type":"news","source":"World News","text":["Headline","Body"]}; {"type":"wallet","from":"Name","direction":"in","amount":100,"reason":"refund"}; {"type":"group","group":"Party","from":"Name","text":["message"]}.`,
    ppSyncInventory(),
-   (actionBody && !actionAlreadyStamped) ? `Unprocessed actions ${un} performed on the phone (already happened; react naturally and account for them in this same response):\n${actionBody}` : null,
+   actionBatch ? `Actions ${un} already performed in Pocket Phone. Treat them as canonical events that already happened and react naturally in this same reply:\n${actionBatch.body}` : null,
   ].filter(Boolean).join('\n');
-  chat.push({ is_user: false, is_system: true, name: 'PocketPhoneSync', mes: instr });
- } else if (cfg.universeAffectsRP) {
-  // Legacy compatibility when automatic JSON sync is intentionally disabled.
-  const instr = `[PhoneBridge — append only when the story truly calls for it: [PP_MSG:Name|text], [PP_CALL:Name], [PP_PAY:Name|amount|reason], [PP_EARN:amount|reason]. Otherwise output nothing extra.]`;
-  chat.push({ is_user: false, is_system: true, name: 'PocketPhone', mes: instr });
+  chat.push({ is_user: false, is_system: true, name: 'PocketPhoneSyncV2', mes: instr });
+ } else {
+  ppCancelActionBatch();
+  ppBridgeExpected = false;
  }
 
- // ★ สถานะประจำเดือน — ฉีดสดทุกเทิร์น ไม่เขียนลงไฟล์
  const period = periodPromptNote();
  if (period) chat.push({ is_user: false, is_system: true, name: 'PocketPhone', mes: `[Pocket Phone health context: ${period}]` });
- } catch (e) { console.warn('[pocket-phone] interceptor', e); }
+ } catch (e) { ppBridgeExpected = false; ppCancelActionBatch(); console.warn('[pocket-phone] interceptor', e); }
 };
-let ppLastHandledMainMsg = '';
 // แปลงคำบอกเวลาย้อนหลังแบบหยาบ ๆ เป็น timestamp ("เมื่อคืน" "2 ชม." "3 วัน")
 function ppAgoToTs(ago) {
  let ts = Date.now();
@@ -8308,7 +8400,7 @@ async function ppSweepOldKeys() {
  if (dirty) await ppSaveChatNow();
  } catch (e) { console.warn('[pocket-phone] sweep old keys', e); }
 }
-async function ppHandleMainChatMessage() {
+async function ppHandleMainChatMessageLegacy() {
  try {
  const cfgNow = getCfg();
  if (!cfgNow.universeAffectsRP && cfgNow.autoSyncEnabled === false) return;
@@ -8687,6 +8779,68 @@ async function ppHandleMainChatMessage() {
  updateHomeWidgets();
  } catch (e) { console.warn('[pocket-phone] main-chat parse', e); }
 }
+let ppMainSyncRunning = false;
+async function ppHandleMainChatMessage() {
+ if (ppMainSyncRunning) return;
+ try {
+  const cfg = getCfg();
+  if (cfg.autoSyncEnabled === false) { ppBridgeExpected = false; ppCancelActionBatch(); return; }
+  const c = ctx();
+  if (!c || !Array.isArray(c.chat) || !c.chat.length || ppStGenBusy) return;
+  const idx = c.chat.length - 1;
+  const last = c.chat[idx];
+  if (!last || last.is_user || last.is_system) return;
+
+  const original = String(last.mes || '');
+  const syncInfo = ppExtractSyncBatch(original);
+  // An unfinished v2 frame can be observed by render events during streaming.
+  // Wait for GENERATION_ENDED instead of destroying or recording it early.
+  if (syncInfo.found && syncInfo.error === 'unterminated Pocket Phone frame') return;
+  const cleaned = syncInfo.found ? ppFinalizeSyncMarker(original, syncInfo) : ppFinalizeSyncMarker(original, null);
+  if (!syncInfo.found && !ppBridgeExpected) return;
+  const key = ppMainSyncKey(last, idx, cleaned);
+  if (ppWasMainSyncHandled(key)) {
+   if (cleaned !== original) {
+    last.mes = cleaned;
+    const dom = document.querySelector(`#chat .mes[mesid="${idx}"] .mes_text`);
+    ppDetect();
+    if (dom && PP_CAP.msgFormat) dom.innerHTML = c.messageFormatting(last.mes, last.name, false, false, idx);
+    await ppSaveChatNow();
+   }
+   ppBridgeExpected = false;
+   ppCommitActionBatch();
+   return;
+  }
+
+  ppMainSyncRunning = true;
+  if (syncInfo.found) {
+   if (syncInfo.error) ppRecordSyncReceipt('invalid', 0, 0, syncInfo.error);
+   else {
+    const result = ppApplySyncBatch(syncInfo.payload);
+    if (!result.valid) ppRecordSyncReceipt('invalid', 0, result.ignored, result.detail);
+    else if (result.applied > 0) ppRecordSyncReceipt('applied', result.applied, result.ignored, result.detail);
+    else ppRecordSyncReceipt('noop', 0, result.ignored, result.detail);
+   }
+  } else {
+   ppRecordSyncReceipt('missing', 0, 0, 'model omitted the Pocket Phone v2 frame');
+  }
+  ppRememberMainSync(key);
+  ppCommitActionBatch();
+
+  ppBridgeExpected = false;
+  if (cleaned !== original) {
+   last.mes = cleaned;
+   const dom = document.querySelector(`#chat .mes[mesid="${idx}"] .mes_text`);
+   ppDetect();
+   if (dom && PP_CAP.msgFormat) dom.innerHTML = c.messageFormatting(last.mes, last.name, false, false, idx);
+   await ppSaveChatNow();
+  }
+  renderContactList(); updateHomeWidgets();
+  if (ppCurrentScreen === 'feed') renderFeed(); else if (ppCurrentScreen === 'newsapp') renderNewsApp();
+  if (ppCurrentScreen === 'wallet') renderWallet(); if (ppCurrentScreen === 'chat') renderThread();
+ } catch (e) { console.warn('[pocket-phone] main-chat v2 parse', e); }
+ finally { ppMainSyncRunning = false; }
+}
 
 // ══════════════════════════════════════════════════════════
 // FAB — clamp ไม่หลุดจอ + drag
@@ -8812,7 +8966,7 @@ function registerSettingsPanel() {
  <label style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><input type="checkbox" id="pp-ext-log-toggle"> แทรกกิจกรรมมือถือเข้าบทหลัก</label>
  <input id="pp-ext-open" class="menu_button" type="button" value="เปิดมือถือ">
  <input id="pp-ext-diag" class="menu_button" type="button" value="Diagnostics">
- <input id="pp-ext-strip" class="menu_button" type="button" value="ล้างบล็อกออกจากแชท">
+ <input id="pp-ext-strip" class="menu_button" type="button" value="ล้างข้อมูลซ่อนจากรุ่นเก่า">
  </div>
 </div>`);
  const fabT = document.getElementById('pp-ext-fab-toggle');
@@ -9512,29 +9666,16 @@ window.PP_LOADED = 'parsed';
  try {
  const c = ctx();
  if (c && c.eventSource && c.event_types) {
- // ★ หัวใจ: แทรก Action Log ตอนผู้ใช้ส่งข้อความโรลเพลย์
- if (c.event_types.MESSAGE_SENT) {
- c.eventSource.on(c.event_types.MESSAGE_SENT, () => setTimeout(() => ppStampUserMessage(), 60));
- } else if (c.event_types.GENERATION_STARTED) {
- c.eventSource.on(c.event_types.GENERATION_STARTED, () => setTimeout(() => ppStampUserMessage(), 60));
- } else {
- console.warn('[pocket-phone] ไม่พบ MESSAGE_SENT — Action Log จะแทรกผ่าน interceptor สำรอง');
- }
- // ★ 1.0.0 : รู้ว่า ST กำลังเจน เพื่อไม่ยิงชน
+ // Parse only after generation is complete; render events can fire mid-stream.
  if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, () => { ppStGenBusy = true; });
- if (c.event_types.GENERATION_ENDED) c.eventSource.on(c.event_types.GENERATION_ENDED, () => { ppStGenBusy = false; });
- if (c.event_types.GENERATION_STOPPED) c.eventSource.on(c.event_types.GENERATION_STOPPED, () => { ppStGenBusy = false; });
- if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => setTimeout(ppHandleMainChatMessage, 220));
- if (c.event_types.CHARACTER_MESSAGE_RENDERED) c.eventSource.on(c.event_types.CHARACTER_MESSAGE_RENDERED, () => setTimeout(ppHandleMainChatMessage, 220));
+ if (c.event_types.GENERATION_ENDED) c.eventSource.on(c.event_types.GENERATION_ENDED, () => { ppStGenBusy = false; setTimeout(ppHandleMainChatMessage, 180); });
+ if (c.event_types.GENERATION_STOPPED) c.eventSource.on(c.event_types.GENERATION_STOPPED, () => { ppStGenBusy = false; ppBridgeExpected = false; ppCancelActionBatch(); });
+ if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => setTimeout(ppHandleMainChatMessage, 180));
+ if (c.event_types.CHARACTER_MESSAGE_RENDERED) c.eventSource.on(c.event_types.CHARACTER_MESSAGE_RENDERED, () => setTimeout(ppHandleMainChatMessage, 180));
  if (c.event_types.CHAT_CHANGED) c.eventSource.on(c.event_types.CHAT_CHANGED, () => {
- ppLastHandledMainMsg = ''; getCfg().logStamps = []; saveCfg();
- // ST สลับแชท → ถ้ากําลังเปิดแชทบอทหลักอยู่ ให้ re-render ให้ตรงแชทใหม่
- if (ppCurrentScreen === 'chat' && ppActiveContact && ppActiveContact.id === currentCharacterId()) renderThread();
- // ไล่ซ่อนคีย์ทั้งแชทหลังโหลดใหม่ (กันคีย์ในข้อความเก่าโผล่)
- setTimeout(() => {
- try { document.querySelectorAll('#chat .mes .mes_text').forEach(el => ppHideKeysInDom(el)); } catch {}
- }, 400);
- updateHomeWidgets();
+  ppBridgeExpected = false; ppCancelActionBatch(); getCfg().logStamps = []; saveCfg();
+  if (ppCurrentScreen === 'chat' && ppActiveContact && ppActiveContact.id === currentCharacterId()) renderThread();
+  updateHomeWidgets();
  });
  }
  } catch (e) { console.warn('[pocket-phone] event hook', e); }
