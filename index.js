@@ -1,4 +1,4 @@
-// pocket-phone/index.js — 1.2.0
+// pocket-phone/index.js — 1.2.1
 // ★ Action Log stays in extension state and enters the next generation as an
 // ephemeral system prompt. Main replies return a plain JSON frame that is
 // consumed and removed—no HTML comments, hidden divs, or extra model request.
@@ -7,7 +7,7 @@
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 4 ท่อน
 
-const PP_VERSION = '1.2.0';
+const PP_VERSION = '1.2.1';
 const MODULE_NAME = 'pocket-phone';
 
 function ctx() {
@@ -3366,27 +3366,19 @@ function ppClose() {
  else dlg.removeAttribute('open');
  islandRefresh();
 }
-function ppNav(screen) {
- ppCurrentScreen = screen;
- document.querySelectorAll('.pp-screen').forEach(s => { s.classList.remove('show', 'pp-enter'); });
- const id = screen === 'home' ? 'pp-home' : 'pp-scr-' + screen;
- const el = document.getElementById(id);
- if (!el) { ppCurrentScreen = 'home'; document.getElementById('pp-home')?.classList.add('show'); ppToast('เร็ว ๆ นี้: ' + screen); return; }
- el.classList.add('show');
- if (screen !== 'home') el.classList.add('pp-enter');
-
+function ppRenderScreen(screen, resetTransient) {
  if (screen === 'home') updateHomeWidgets();
  if (screen === 'messages') { renderNotesRow(); renderContactList(); }
  if (screen === 'contacts') renderAddContacts();
  if (screen === 'archive') renderArchive();
- if (screen === 'chat') { ppHistShown = HIST_PAGE; renderThread(); }
+ if (screen === 'chat') { if (resetTransient) ppHistShown = HIST_PAGE; renderThread(); }
  if (screen === 'starred') renderStarredScreen();
  if (screen === 'chatsettings') renderChatSettings();
  if (screen === 'groupnew') renderGroupEditor();
  if (screen === 'groupsettings') renderGroupSettings();
  if (screen === 'settings') renderPhoneSettings();
  if (screen === 'stickers') renderStickerManager();
- if (screen === 'logview') { ppLogSelected.clear(); renderLogView(); }
+ if (screen === 'logview') { if (resetTransient) ppLogSelected.clear(); renderLogView(); }
  if (screen === 'calllog') renderCallLog();
  if (screen === 'feed') renderFeed();
  if (screen === 'newsapp') renderNewsApp();
@@ -3397,6 +3389,23 @@ function ppNav(screen) {
  if (screen === 'wallet') renderWallet();
  if (screen === 'period') renderPeriod();
  if (screen === 'helper') renderHelper();
+}
+function ppRefreshAllViews() {
+ updateHomeWidgets();
+ ppUpdateLogBadge();
+ if (ppCurrentScreen !== 'messages') renderNotesRow();
+ ppRenderScreen(ppCurrentScreen, false);
+ islandRefresh();
+}
+function ppNav(screen) {
+ ppCurrentScreen = screen;
+ document.querySelectorAll('.pp-screen').forEach(s => { s.classList.remove('show', 'pp-enter'); });
+ const id = screen === 'home' ? 'pp-home' : 'pp-scr-' + screen;
+ const el = document.getElementById(id);
+ if (!el) { ppCurrentScreen = 'home'; document.getElementById('pp-home')?.classList.add('show'); ppToast('เร็ว ๆ นี้: ' + screen); return; }
+ el.classList.add('show');
+ if (screen !== 'home') el.classList.add('pp-enter');
+ ppRenderScreen(screen, true);
 }
 function ppViewing(tid) {
  return ppCurrentScreen === 'chat' && !!document.getElementById('pp-dialog')?.open &&
@@ -5410,7 +5419,7 @@ async function ppNewsGenerate() {
   ppLog('feed', `อ่านข่าวใหม่จาก ${src}: "${String(text).split('\n')[0].slice(0, 70)}"`);
   renderNewsApp();
   ppToast('มีข่าวใหม่');
- } catch (e) { console.error('[pocket-phone] news gen', e); ppToast('เชื่อมต่อไม่ได้'); }
+ } catch (e) { console.error('[pocket-phone] news gen', e); ppToast('สร้างข่าวไม่สำเร็จ: ' + ppGenerationError(e)); }
  finally {
   ppNewsGenBusy = false; ppFeedGenAbort = false; ppGenAbort = false; islandCollapse();
   const g2 = document.getElementById('pp-news-gen'); if (g2) g2.style.display = 'flex';
@@ -7272,14 +7281,34 @@ function ppStopGen() {
  try { const c = ctx(); if (c && typeof c.stopGeneration === 'function') c.stopGeneration(); } catch {}
  hideTyping(); islandCollapse(); showGenControls(false);
 }
+function ppGenerationError(e) {
+ const raw = String((e && (e.message || e.error || e.statusText)) || e || '').trim();
+ if (!raw) return 'ไม่ทราบสาเหตุ';
+ if (/no.?connection|not connected|offline|failed to fetch|network/i.test(raw)) return 'SillyTavern ยังไม่ได้เชื่อมต่อ API';
+ if (/quota|credit|insufficient|billing/i.test(raw)) return 'โควตาหรือเครดิต API ไม่เพียงพอ';
+ if (/rate.?limit|\b429\b/i.test(raw)) return 'API จำกัดความถี่ กรุณารอสักครู่';
+ return raw.slice(0, 160);
+}
+async function ppCallGenerator(fn, owner, prompt, kind) {
+ if (typeof fn !== 'function') throw new Error('ไม่พบฟังก์ชันสร้างข้อความ');
+ // ST 1.13.2+ uses one object argument. Old builds expose several arguments.
+ // Detect before calling, so compatibility never costs an extra API request.
+ if (fn.length <= 1) {
+  if (kind === 'quiet') return await fn.call(owner, { quietPrompt: prompt });
+  return await fn.call(owner, { prompt });
+ }
+ if (kind === 'quiet') return await fn.call(owner, prompt, false, false);
+ return await fn.call(owner, prompt, '', false, false);
+}
 async function genOnce(prompt) {
  return ppGenEnqueue(async () => {
   const c = ctx();
-  ppDetect();
-  if (PP_CAP.genQuiet) return await c.generateQuietPrompt(prompt, false, false);
-  if (typeof window.generateQuietPrompt === 'function') return await window.generateQuietPrompt(prompt, false, false);
-  if (PP_CAP.genRaw) return await c.generateRaw(prompt, '', false, false);
-  throw new Error('ไม่พบช่องทางเจน (generateQuietPrompt)');
+  const cap = ppDetect(true);
+  if (cap.genQuiet) return await ppCallGenerator(c.generateQuietPrompt, c, prompt, 'quiet');
+  if (typeof window.generateQuietPrompt === 'function') return await ppCallGenerator(window.generateQuietPrompt, window, prompt, 'quiet');
+  if (cap.genRaw) return await ppCallGenerator(c.generateRaw, c, prompt, 'raw');
+  if (typeof window.generateRaw === 'function') return await ppCallGenerator(window.generateRaw, window, prompt, 'raw');
+  throw new Error('SillyTavern เวอร์ชันนี้ไม่มีช่องทางสร้างข้อความ');
  });
 }
 async function genWithRetry(prompt, tries) {
@@ -7728,7 +7757,7 @@ async function ppFeedGenerate(forcedAuthorId) {
  ppToast('มีโพสต์ใหม่');
  if (!isNews) { pushNotif(author.id, 'feed', `${dname(author)} โพสต์ใหม่`); if (!document.getElementById('pp-dialog')?.open) islandNotify(author, `${dname(author)} โพสต์ใหม่`); }
  } else ppToast('บอทยังไม่โพสต์ ลองอีกครั้ง');
- } catch (e) { console.error('[pocket-phone] feed gen', e); ppToast('เชื่อมต่อไม่ได้'); }
+ } catch (e) { console.error('[pocket-phone] feed gen', e); ppToast('สร้างโพสต์ไม่สำเร็จ: ' + ppGenerationError(e)); }
  finally { ppFeedGenBusy = false; ppFeedGenAbort = false; ppGenAbort = false; islandCollapse(); showFeedGenControls(false); }
 }
 function ppPickCommenters() {
@@ -7870,7 +7899,7 @@ async function ppPostGenerate(onlyIds) {
  saveCfg();
  renderPost();
  ppToast(cloutMsg || (added ? `+${added} คอมเมนต์` : 'บอทยังไม่คอมเมนต์ ลองอีกครั้ง'));
- } catch (e) { console.error('[pocket-phone] post gen', e); ppToast('เชื่อมต่อไม่ได้'); }
+ } catch (e) { console.error('[pocket-phone] post gen', e); ppToast('สร้างคอมเมนต์ไม่สำเร็จ: ' + ppGenerationError(e)); }
  finally { ppFeedGenBusy = false; ppFeedGenAbort = false; ppGenAbort = false; islandCollapse(); showPostGenControls(false); }
 }
 
@@ -8258,11 +8287,7 @@ function ppApplySyncBatch(payload) {
   } catch (e) { ignored++; errors.push(e && e.message ? e.message : 'event failed'); }
  });
  saveCfg();
- renderContactList(); updateHomeWidgets();
- if (ppCurrentScreen === 'feed') renderFeed();
- else if (ppCurrentScreen === 'newsapp') renderNewsApp();
- if (ppCurrentScreen === 'wallet') renderWallet();
- if (ppCurrentScreen === 'chat') renderThread();
+ ppRefreshAllViews();
  return { valid: true, applied, ignored, detail: (labels.length ? labels.join(', ') : errors.join(', ')).slice(0, 180) };
 }
 function ppSyncInventory() {
@@ -8287,6 +8312,9 @@ window.ppGenInterceptor = function (chat, contextSize, abort, type) {
  }
  if (!Array.isArray(chat)) return;
  const un = getUserDisplayName();
+ const lastUserMsg = chat.slice().reverse().find(m => m && (m.is_user === true || m.role === 'user'));
+ const lastUserText = String(lastUserMsg && (lastUserMsg.mes || lastUserMsg.content) || '');
+ const explicitNewsRequest = /ข่าวมือถือ|ข่าวใน(?:แอป|ระบบ)|สร้างข่าว|เพิ่มข่าว|ลงข่าว|pocket\s*phone\s*news|phone\s*news/i.test(lastUserText);
  if (cfg.autoSyncEnabled !== false) {
   const actionBatch = ppPrepareActionBatch();
   ppBridgeExpected = true;
@@ -8295,7 +8323,9 @@ window.ppGenInterceptor = function (chat, contextSize, abort, type) {
    `[Pocket Phone v2 one-request bridge. This is part of the SAME normal response and must never trigger or imply a second model call.]`,
    `After the normal roleplay prose, append exactly one plain data frame (not HTML, not a div, not a comment, not a code fence):`,
    `${PP_SYNC_FRAME_START}{"v":2,"events":[]}${PP_SYNC_FRAME_END}`,
-   `The extension consumes and removes this frame from chat. Put every phone consequence caused or clearly implied by this turn in events. If none, use an empty array. Never mention the frame in prose.`,
+   `The extension consumes and removes this frame from chat. Put every phone consequence caused, requested, or clearly implied by this turn in events. If none, use an empty array. Never mention the frame in prose.`,
+   explicitNewsRequest ? `The user's latest message explicitly requests phone news. You MUST include at least one valid event with type "news", source, and text/headline/body based on that request; do not return an empty events array.` : null,
+   `Significant public incidents, discoveries, battles, disasters, political decisions, competitions, or widely witnessed developments should normally create one news event. Private narration alone should not invent unrelated phone activity.`,
    `Story-driven event types supported by the phone:`,
    `Messages: contact; dm; voice; sticker; location; gift; poll; unsend; story_reply. Common fields: from, text, label, url, place, note, question, options, storyId.`,
    `Groups/calls: group (group, members, from, text); call (from, live); missed_call; call_log (from, minutes, transcript).`,
@@ -8780,19 +8810,80 @@ async function ppHandleMainChatMessageLegacy() {
  } catch (e) { console.warn('[pocket-phone] main-chat parse', e); }
 }
 let ppMainSyncRunning = false;
+let ppSyncWatchTimer = null;
+let ppSyncObserver = null;
+let ppSyncDebounce = null;
+function ppMaskSyncFramesInDom(scope) {
+ try {
+  const root = scope && scope.querySelectorAll ? scope : document;
+  const blocks = [];
+  if (root.matches && root.matches('.mes_text')) blocks.push(root);
+  root.querySelectorAll?.('.mes_text').forEach(el => blocks.push(el));
+  blocks.forEach(el => {
+   for (let guard = 0; guard < 4; guard++) {
+    const flat = String(el.textContent || '');
+    const start = flat.indexOf(PP_SYNC_FRAME_START);
+    if (start < 0) break;
+    const closeAt = flat.indexOf(PP_SYNC_FRAME_END, start + PP_SYNC_FRAME_START.length);
+    const end = closeAt < 0 ? flat.length : closeAt + PP_SYNC_FRAME_END.length;
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, null);
+    const nodes = []; let pos = 0, node;
+    while ((node = walker.nextNode())) {
+     const len = node.nodeValue.length;
+     nodes.push({ node, from: pos, to: pos + len }); pos += len;
+    }
+    const a = nodes.find(x => start >= x.from && start <= x.to);
+    const b = nodes.find(x => end >= x.from && end <= x.to) || nodes[nodes.length - 1];
+    if (!a || !b) break;
+    const range = document.createRange();
+    range.setStart(a.node, Math.max(0, start - a.from));
+    range.setEnd(b.node, Math.max(0, Math.min(b.node.nodeValue.length, end - b.from)));
+    range.deleteContents(); el.dataset.ppSyncMasked = '1';
+   }
+  });
+ } catch (e) { console.warn('[pocket-phone] sync DOM mask', e); }
+}
+function ppScheduleMainSync(delay) {
+ clearTimeout(ppSyncDebounce);
+ ppSyncDebounce = setTimeout(() => { ppMaskSyncFramesInDom(document); ppHandleMainChatMessage(); }, Math.max(0, delay || 0));
+}
+function ppStartSyncWatchdog() {
+ if (ppSyncWatchTimer) return;
+ const scan = () => {
+  ppMaskSyncFramesInDom(document);
+  try {
+   const c = ctx();
+   const last = c && Array.isArray(c.chat) ? c.chat[c.chat.length - 1] : null;
+   const mes = String(last && last.mes || '');
+   if (mes.includes(PP_SYNC_FRAME_START) || (ppBridgeExpected && !ppStGenBusy && ppGenAvailable())) ppHandleMainChatMessage();
+  } catch {}
+ };
+ ppSyncWatchTimer = setInterval(scan, 900);
+ const target = document.getElementById('chat') || document.body;
+ if (target && typeof MutationObserver === 'function') {
+  ppSyncObserver = new MutationObserver(mutations => {
+   mutations.forEach(m => m.addedNodes && m.addedNodes.forEach(n => { if (n && n.nodeType === 1) ppMaskSyncFramesInDom(n); }));
+   ppScheduleMainSync(220);
+  });
+  ppSyncObserver.observe(target, { childList: true, subtree: true, characterData: true });
+ }
+ scan();
+}
 async function ppHandleMainChatMessage() {
  if (ppMainSyncRunning) return;
  try {
   const cfg = getCfg();
   if (cfg.autoSyncEnabled === false) { ppBridgeExpected = false; ppCancelActionBatch(); return; }
   const c = ctx();
-  if (!c || !Array.isArray(c.chat) || !c.chat.length || ppStGenBusy) return;
+  if (!c || !Array.isArray(c.chat) || !c.chat.length) return;
   const idx = c.chat.length - 1;
   const last = c.chat[idx];
   if (!last || last.is_user || last.is_system) return;
 
   const original = String(last.mes || '');
   const syncInfo = ppExtractSyncBatch(original);
+  // A complete frame is safe even if a mobile ST build leaves busy=true.
+  if (!syncInfo.found && (ppStGenBusy || ppOwnGenBusy)) return;
   // An unfinished v2 frame can be observed by render events during streaming.
   // Wait for GENERATION_ENDED instead of destroying or recording it early.
   if (syncInfo.found && syncInfo.error === 'unterminated Pocket Phone frame') return;
@@ -8835,9 +8926,8 @@ async function ppHandleMainChatMessage() {
    if (dom && PP_CAP.msgFormat) dom.innerHTML = c.messageFormatting(last.mes, last.name, false, false, idx);
    await ppSaveChatNow();
   }
-  renderContactList(); updateHomeWidgets();
-  if (ppCurrentScreen === 'feed') renderFeed(); else if (ppCurrentScreen === 'newsapp') renderNewsApp();
-  if (ppCurrentScreen === 'wallet') renderWallet(); if (ppCurrentScreen === 'chat') renderThread();
+  ppRefreshAllViews();
+  ppMaskSyncFramesInDom(document);
  } catch (e) { console.warn('[pocket-phone] main-chat v2 parse', e); }
  finally { ppMainSyncRunning = false; }
 }
@@ -9663,15 +9753,16 @@ window.PP_LOADED = 'parsed';
  startClock();
  refreshUserAvatar();
  pruneStories();
+ ppStartSyncWatchdog();
  try {
  const c = ctx();
  if (c && c.eventSource && c.event_types) {
  // Parse only after generation is complete; render events can fire mid-stream.
  if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, () => { ppStGenBusy = true; });
- if (c.event_types.GENERATION_ENDED) c.eventSource.on(c.event_types.GENERATION_ENDED, () => { ppStGenBusy = false; setTimeout(ppHandleMainChatMessage, 180); });
- if (c.event_types.GENERATION_STOPPED) c.eventSource.on(c.event_types.GENERATION_STOPPED, () => { ppStGenBusy = false; ppBridgeExpected = false; ppCancelActionBatch(); });
- if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => setTimeout(ppHandleMainChatMessage, 180));
- if (c.event_types.CHARACTER_MESSAGE_RENDERED) c.eventSource.on(c.event_types.CHARACTER_MESSAGE_RENDERED, () => setTimeout(ppHandleMainChatMessage, 180));
+ if (c.event_types.GENERATION_ENDED) c.eventSource.on(c.event_types.GENERATION_ENDED, () => { ppStGenBusy = false; ppScheduleMainSync(80); });
+ if (c.event_types.GENERATION_STOPPED) c.eventSource.on(c.event_types.GENERATION_STOPPED, () => { ppStGenBusy = false; ppBridgeExpected = false; ppCancelActionBatch(); ppMaskSyncFramesInDom(document); });
+ if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => ppScheduleMainSync(120));
+ if (c.event_types.CHARACTER_MESSAGE_RENDERED) c.eventSource.on(c.event_types.CHARACTER_MESSAGE_RENDERED, () => ppScheduleMainSync(120));
  if (c.event_types.CHAT_CHANGED) c.eventSource.on(c.event_types.CHAT_CHANGED, () => {
   ppBridgeExpected = false; ppCancelActionBatch(); getCfg().logStamps = []; saveCfg();
   if (ppCurrentScreen === 'chat' && ppActiveContact && ppActiveContact.id === currentCharacterId()) renderThread();
