@@ -1,4 +1,4 @@
-// pocket-phone/index.js — 1.2.1
+// pocket-phone/index.js — 1.2.2
 // ★ Action Log stays in extension state and enters the next generation as an
 // ephemeral system prompt. Main replies return a plain JSON frame that is
 // consumed and removed—no HTML comments, hidden divs, or extra model request.
@@ -7,7 +7,7 @@
 // getContext ล้วน · ไม่มี import/export · lazy + try/catch
 // ⚠️ รันเดี่ยวไม่ได้ ต้องแปะครบ 4 ท่อน
 
-const PP_VERSION = '1.2.1';
+const PP_VERSION = '1.2.2';
 const MODULE_NAME = 'pocket-phone';
 
 function ctx() {
@@ -66,21 +66,35 @@ async function ppTrackTokens(prompt, resp) {
 // ★ 1.0.0 GEN LOCK — กันยิงซ้อนกับ extension อื่น (summary ฯลฯ)
 // ══════════════════════════════════════════════════════════
 let ppStGenBusy = false;      // ST กำลังเจนของตัวเองอยู่
+let ppStGenBusySince = 0;     // mobile builds can miss GENERATION_ENDED
 let ppOwnGenBusy = false;     // เราเองกำลังยิง
 const ppGenQueue = [];        // คิวรอ
 let ppGenQueueRunning = false;
 
-function ppGenAvailable() {
- if (ppStGenBusy || ppOwnGenBusy) return false;
+function ppRuntimeGenerationBusy() {
  try {
   const c = ctx();
-  if (c && c.streamingProcessor) return false;
+  if (c && c.streamingProcessor) return true;
  } catch {}
  try {
   const btn = document.getElementById('mes_stop');
-  if (btn && btn.offsetParent !== null) return false; // ST โชว์ปุ่มหยุด = กำลังเจน
+  if (btn && btn.offsetParent !== null) return true; // ST โชว์ปุ่มหยุด = กำลังเจน
  } catch {}
- return true;
+ return false;
+}
+function ppGenAvailable() {
+ if (ppOwnGenBusy) return false;
+ const runtimeBusy = ppRuntimeGenerationBusy();
+ if (ppStGenBusy) {
+  if (!ppStGenBusySince) ppStGenBusySince = Date.now();
+  // Some mobile/background providers never emit GENERATION_ENDED. Once every
+  // runtime signal is idle, release the stale event flag instead of waiting 60s.
+  if (!runtimeBusy && Date.now() - ppStGenBusySince >= 1800) {
+   ppStGenBusy = false;
+   ppStGenBusySince = 0;
+  } else return false;
+ }
+ return !runtimeBusy;
 }
 function ppWaitFree(maxMs) {
  const limit = maxMs || 60000;
@@ -8297,6 +8311,51 @@ function ppSyncInventory() {
  const stories = liveStories().slice(-5).map(s => `${s.id}:${s.author === 'user' ? getUserDisplayName() : cname(s.author)}:${String(s.text || '[image]').slice(0, 60)}`);
  return [`Contacts=${contacts.join(', ') || 'none'}`, `Groups=${groups.join('; ') || 'none'}`, `RecentPosts=${posts.join('; ') || 'none'}`, `LiveStories=${stories.join('; ') || 'none'}`, `UserWallet=${fmtMoney(walletBalanceGet())}`, `Account=${getCfg().accountLocked ? 'private' : 'public'}`].join('\n');
 }
+function ppMainChatUiState() {
+ const cfg = getCfg();
+ const activeId = (typeof ppActiveGroup !== 'undefined' && ppActiveGroup?.id)
+  || (typeof ppActiveContact !== 'undefined' && ppActiveContact?.id) || '';
+ const activeContact = activeId && !isGroupId(activeId) ? findContact(activeId) : null;
+ const activeName = activeId && isGroupId(activeId)
+  ? (getGroups().find(g => g.id === activeId)?.name || activeId)
+  : (activeContact ? dname(activeContact) : activeId);
+ const style = activeId && cfg.chatStyle && cfg.chatStyle[activeId] ? cfg.chatStyle[activeId] : {};
+ return JSON.stringify({
+  appearance: {
+   theme: cfg.theme,
+   accentColor: cfg.accent,
+   wallpaper: cfg.wallpaper,
+   homeBlur: cfg.homeBlur,
+   dynamicIsland: cfg.dynamicIsland,
+   compactHeader: cfg.headerCompact,
+  },
+  currentView: {
+   screen: typeof ppCurrentScreen !== 'undefined' ? ppCurrentScreen : 'home',
+   activeThread: activeName || null,
+   activeChatStyle: {
+    background: style.bg || style.background || null,
+    bubbleColor: style.bubble || style.bubbleColor || null,
+    textColor: style.textColor || null,
+    glass: style.bubbleGlass ?? null,
+    messageBlur: style.msgBlur ?? null,
+    shape: style.tail || null,
+   },
+  },
+  account: {
+   displayName: getUserDisplayName(),
+   handle: cfg.userHandle || null,
+   privacy: cfg.accountLocked ? 'private' : 'public',
+   defaultPostVisibility: cfg.postVisibilityDefault,
+   closeFriends: (cfg.closeFriends || []).map(id => cname(id)).filter(Boolean).slice(0, 20),
+  },
+  phoneState: {
+   wallet: fmtMoney(walletBalanceGet()),
+   currency: cfg.walletCurrency,
+   unreadNotifications: (cfg.notifCenter || []).filter(n => !n.seen).length,
+   currentStatus: cfg.userNote?.text || cfg.userNote || null,
+  },
+ });
+}
 
 // ══════════════════════════════════════════════════════════
 // BRIDGE — ephemeral prompt in, plain JSON frame out
@@ -8334,6 +8393,7 @@ window.ppGenInterceptor = function (chat, contextSize, abort, type) {
    `Use valid JSON with double quotes, exact existing names/IDs from inventory when available, and no invented phone activity. Maximum ${Math.max(1, Math.min(20, cfg.syncMaxEvents || 8))} events.`,
    `Examples: {"type":"news","source":"World News","text":["Headline","Body"]}; {"type":"wallet","from":"Name","direction":"in","amount":100,"reason":"refund"}; {"type":"group","group":"Party","from":"Name","text":["message"]}.`,
    ppSyncInventory(),
+   `Current Pocket Phone UI/local state. These are canonical choices already made in the extension; the main chat knows them and may acknowledge them when relevant. Do not invent changes just to mirror them:\n${ppMainChatUiState()}`,
    actionBatch ? `Actions ${un} already performed in Pocket Phone. Treat them as canonical events that already happened and react naturally in this same reply:\n${actionBatch.body}` : null,
   ].filter(Boolean).join('\n');
   chat.push({ is_user: false, is_system: true, name: 'PocketPhoneSyncV2', mes: instr });
@@ -9758,9 +9818,9 @@ window.PP_LOADED = 'parsed';
  const c = ctx();
  if (c && c.eventSource && c.event_types) {
  // Parse only after generation is complete; render events can fire mid-stream.
- if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, () => { ppStGenBusy = true; });
- if (c.event_types.GENERATION_ENDED) c.eventSource.on(c.event_types.GENERATION_ENDED, () => { ppStGenBusy = false; ppScheduleMainSync(80); });
- if (c.event_types.GENERATION_STOPPED) c.eventSource.on(c.event_types.GENERATION_STOPPED, () => { ppStGenBusy = false; ppBridgeExpected = false; ppCancelActionBatch(); ppMaskSyncFramesInDom(document); });
+ if (c.event_types.GENERATION_STARTED) c.eventSource.on(c.event_types.GENERATION_STARTED, () => { ppStGenBusy = true; ppStGenBusySince = Date.now(); });
+ if (c.event_types.GENERATION_ENDED) c.eventSource.on(c.event_types.GENERATION_ENDED, () => { ppStGenBusy = false; ppStGenBusySince = 0; ppScheduleMainSync(80); });
+ if (c.event_types.GENERATION_STOPPED) c.eventSource.on(c.event_types.GENERATION_STOPPED, () => { ppStGenBusy = false; ppStGenBusySince = 0; ppBridgeExpected = false; ppCancelActionBatch(); ppMaskSyncFramesInDom(document); });
  if (c.event_types.MESSAGE_RECEIVED) c.eventSource.on(c.event_types.MESSAGE_RECEIVED, () => ppScheduleMainSync(120));
  if (c.event_types.CHARACTER_MESSAGE_RENDERED) c.eventSource.on(c.event_types.CHARACTER_MESSAGE_RENDERED, () => ppScheduleMainSync(120));
  if (c.event_types.CHAT_CHANGED) c.eventSource.on(c.event_types.CHAT_CHANGED, () => {
